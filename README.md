@@ -76,6 +76,12 @@ What remains risky:
 - Mitigation is strict least-privilege permissions, short expiry windows, and easy revoke/rotate workflows.
 - In MVP local-admin mode, compromise of the agent host can still trigger admin-approval attempts on that host.
 
+## Custody and Portability
+- Key custody is non-custodial: agent and admin keys are controlled by the user (not held by a third-party custodian).
+- Current execution path uses Porto infrastructure, but custody remains with user-controlled keys.
+- Architecture intent is backend portability via an internal provider adapter (Porto first, others possible later).
+- This is not "zero dependency", but it is designed to avoid provider custody lock-in.
+
 ```mermaid
 flowchart LR
     H["Human Operator"] --> P["Passkey Admin Key"]
@@ -115,3 +121,4 @@ Spec source of truth:
 - Move signer handle persistence into keychain.
 - Add E2E coverage for the new top-level UX.
 - Add remote-admin bootstrap as a post-MVP mode.
+- Evaluate additional backend adapters later (e.g., ZeroDev, Privy, Para, others) if they improve the security/operability tradeoff.

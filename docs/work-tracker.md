@@ -38,6 +38,7 @@ Validation note:
 ## Later
 - Remote-admin bootstrap (out-of-band admin ceremony from separate device).
 - Multi-account aliases and default profile ergonomics.
+- Evaluate additional backend adapters (ZeroDev, Privy, Para, others) after Porto-first UX stabilizes.
 
 ## Done
 - Established security-model documentation in spec and README.

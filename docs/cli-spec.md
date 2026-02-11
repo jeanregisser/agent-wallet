@@ -118,6 +118,11 @@ Should include:
 - Keep “Powered by Porto” visible in docs/version/status output.
 - Avoid premature multi-provider abstraction complexity until a second backend is real.
 
+## Custody Stance
+- Key custody is user-controlled and non-custodial.
+- Provider infrastructure (currently Porto) is an execution dependency, not a key custodian.
+- Project goal is low provider lock-in through adapter boundaries, without claiming infrastructure independence.
+
 ## Output Contract
 Global output modes:
 - `--json`: machine-readable output (stable schema).
@@ -175,3 +180,4 @@ Given zero production users, compatibility is not required for the next iteratio
 - [ ] Move Secure Enclave opaque handle storage from config to keychain item.
 - [ ] Add E2E coverage for new top-level command surface.
 - [ ] Add remote-admin bootstrap mode (out-of-band admin ceremony from separate device).
+- [ ] Evaluate additional backend adapters (e.g., ZeroDev, Privy, Para, others) using security/custody/lock-in criteria before adding support.

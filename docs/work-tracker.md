@@ -30,10 +30,11 @@ Validation note:
 
 ## Now
 - Define and implement `configure`, `sign`, `status` top-level UX.
+- Implement scenario-based e2e suite: `configure.e2e`, `sign.e2e`, `status.e2e`, `non-interactive.e2e`.
 
 ## Next
 - Move Secure Enclave opaque handle storage from config into keychain item.
-- Add top-level-command e2e coverage on testnet.
+- Run the scenario-based e2e suite on testnet and record stable pass/fail contract.
 
 ## Later
 - Remote-admin bootstrap (out-of-band admin ceremony from separate device).

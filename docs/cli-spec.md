@@ -157,12 +157,26 @@ Interactive command in non-interactive context returns:
 ```
 
 ## Testing (E2E)
-Required flows for target UX:
-1. `agent-wallet configure` creates/reuses account and grants agent key permissions.
-2. `agent-wallet status` shows account, permissions, and balances.
-3. `agent-wallet sign` succeeds for allowed calls.
-4. `agent-wallet sign` fails for disallowed calls.
-5. Non-interactive mode returns actionable errors for interactive-only paths.
+Strategy:
+- Prefer a small number of scenario tests with broad coverage over many narrow tests.
+- Each feature test should validate behavior plus the key invariants that prevent regression slope.
+- Every top-level feature must have at least one robust e2e scenario.
+
+Required scenario set (concise but high-signal):
+1. `configure.e2e`
+- Happy path: creates or reuses account and grants agent key permissions.
+- Security invariant: resulting permissions are scoped and active.
+- Recovery invariant: rerun is idempotent and does not duplicate keys/grants.
+- Output invariant: checkpoint statuses are machine-readable in JSON mode.
+2. `sign.e2e`
+- Happy path: allowed call succeeds.
+- Security invariant: disallowed call fails with structured error code.
+- Output invariant: JSON response schema is stable.
+3. `status.e2e`
+- Happy path: reports account, permissions summary, and balances.
+- Output invariant: both `--json` and `--human` modes work.
+4. `non-interactive.e2e`
+- Invariant: interactive-only operations fail fast with actionable structured error in non-interactive contexts.
 
 Notes:
 - Testnet-first on live networks.

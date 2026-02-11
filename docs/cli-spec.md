@@ -1,193 +1,112 @@
-# CLI Spec (v0)
+# CLI Spec (v0.2)
+
+## Product Direction
+`agent-wallet` is a security-first wallet CLI for autonomous agents.
+
+Primary user promise:
+- Give an agent a wallet that can act autonomously with tight, inspectable policy boundaries.
+- Keep private key operations hardware-backed and non-exportable by default.
+- Minimize footguns in non-interactive/automation contexts.
+
+Porto is currently the execution backend, but not the user-facing mental model.
 
 ## Design Principles
-- Security-first: default deny until permissions are granted
-- No exportable keys: private key material must never be readable or exportable
-- Policy-bound autonomy: actions constrained by spend caps, allowlists, and expiry
-- Minimal surface area: small CLI surface, clear boundaries
-- Observable by default: permissions and limits must be inspectable
-- No prompts during autonomous signing (explicit choice, increased risk)
+- Security-first defaults: deny by default, grant least privilege.
+- Non-exportable signing keys: private key material never returned to user-space.
+- Policy-bound autonomy: expiry, spend constraints, and call allowlists.
+- Operational clarity: predictable JSON outputs and actionable errors.
+- Explicit interactivity: interactive steps fail clearly in headless environments.
 
-## Scope & Constraints
-- Non-extractable key storage (Secure Enclave on macOS)
-- Minimal attack surface
-- Backend-agnostic signer usable by Porto and future adapters
-- Single primary CLI (`agent-wallet`) for user-facing flows
-- No exportable keys: private key material must never be readable or exportable
-- Extensible key types: P-256 now, others later (e.g., secp256k1)
+## Scope & Constraints (MVP)
+- Language/runtime: TypeScript on Node.js ESM.
+- Signer backend: real macOS Secure Enclave now; backend interface for future platforms.
+- Config path: platform-standard user config directory with `AGENT_WALLET_CONFIG_HOME` override.
+- Backend today: Porto.
+- Security follow-up: move signer opaque handle from config into OS keychain storage.
 
-Implementation note:
-- The implementing agent should consult Porto’s source code to align with current APIs, data formats, and recommended practices before coding.
+## Canonical UX (Target)
+Three user-facing commands:
 
-## Canonical Flow (MVP)
-1. Main user runs onboarding and creates or reuses an existing Porto account.
-2. `agent-wallet` creates or reuses a Secure Enclave agent key via the signer module.
-3. Main user authorizes that agent key on the Porto account.
-4. `agent-wallet` applies initial permissions (safe defaults plus user overrides).
-5. Agent executes autonomously within those permission boundaries.
+### 1. `agent-wallet configure`
+Configures one account end-to-end:
+- create or reuse account
+- initialize/reuse local agent signing key
+- grant default permissions (with optional overrides)
+- optionally force account deployment/initialization transaction
 
-## Internal Module: agent-signer
-`agent-signer` is an internal module used by `agent-wallet` for now. It may be exposed as a standalone CLI later if needed.
+Expected characteristics:
+- idempotent when re-run
+- interactive by default
+- clear non-interactive error with required flags/hints
 
-Reference command surface:
+### 2. `agent-wallet sign`
+Agent execution/signing command.
 
-### `agent-signer init`
-Create a new hardware-backed key and store its handle in the OS keychain.
+For MVP this is call-bundle oriented:
+- prepare calls
+- sign digest using local hardware-backed key
+- submit prepared calls
 
-Flags:
-- `--label <string>`: Optional human-readable label
-- `--overwrite`: Replace existing key if present
+Advanced/raw signing may stay available as an expert mode.
 
-Output (JSON):
-```json
-{
-  "ok": true,
-  "keyId": "se.agent.wallet.default",
-  "curve": "p256",
-  "backend": "secure-enclave"
-}
-```
+### 3. `agent-wallet status`
+Inspection command.
 
-### `agent-signer pubkey`
-Return the public key for registration with wallet backends.
+Should include:
+- active account/profile
+- backend/provider in use
+- key backend health
+- granted permissions summary + expiry
+- balance snapshot per configured chain
 
-Flags:
-- `--format <raw|hex|jwk|spki>` (default: `jwk`)
+## Account Model
+- Multiple accounts are first-class in the data model.
+- Selection key: `--account <address-or-alias>`.
+- Alias support should be supported in config and surfaced in `status`.
+- If no account is passed, use configured default account.
 
-Output (JSON):
-```json
-{
-  "ok": true,
-  "keyId": "se.agent.wallet.default",
-  "curve": "p256",
-  "publicKey": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." }
-}
-```
-
-### `agent-signer sign <payload>`
-Sign a payload. The private key never leaves the enclave.
-
-Flags:
-- `--format <hex|base64|raw>` (default: `hex`)
-- `--hash <none|sha256>` (default: `sha256`)
-
-Input:
-- `payload` is bytes (hex/base64) or raw string depending on format.
-
-Output (JSON):
-```json
-{
-  "ok": true,
-  "keyId": "se.agent.wallet.default",
-  "alg": "ES256",
-  "signature": "<hex>"
-}
-```
-
-### `agent-signer info`
-Show backend and key metadata.
-
-Output (JSON):
-```json
-{
-  "ok": true,
-  "backend": "secure-enclave",
-  "curve": "p256",
-  "keyId": "se.agent.wallet.default"
-}
-```
+## Internal Architecture
+- Keep provider details behind an adapter boundary.
+- Current adapter: Porto.
+- Keep “Powered by Porto” visible in docs/version/status output.
+- Avoid premature multi-provider abstraction complexity until a second backend is real.
 
 ## Error Model
-All errors return:
+All command failures return:
 ```json
-{ "ok": false, "error": { "code": "...", "message": "..." } }
+{ "ok": false, "error": { "code": "...", "message": "...", "details": {} } }
 ```
 
-## Commands: agent-wallet (Porto adapter)
-
-### `agent-wallet porto onboard`
-Interactive passkey onboarding and account creation.
-
-Flags:
-- `--testnet`
-- `--dialog <hostname>` (default: `id.porto.sh`)
-- `--headless` (prints a URL/code for user to complete in browser, if supported)
-
-Output (JSON):
+Interactive command in non-interactive context returns:
 ```json
 {
-  "ok": true,
-  "address": "0x...",
-  "chainId": 8453
+  "ok": false,
+  "error": {
+    "code": "NON_INTERACTIVE_REQUIRES_FLAGS",
+    "message": "Command requires an interactive TTY. Re-run with explicit flags or --headless."
+  }
 }
 ```
 
-Notes:
-- Onboarding UX should take direct inspiration from the official Porto CLI (`porto onboard`), including prompt flow and default behavior.
-- Reuse Porto CLI conventions for flags when possible (`--testnet`, `--dialog`) to reduce user confusion.
-
-### `agent-wallet porto grant`
-Grant scoped permissions to the agent key.
-
-Flags:
-- `--expiry <iso8601>`
-- `--spend-limit <usd>`
-- `--calls <json>`
-- `--defaults` (apply safe defaults: allowlist required, low caps, short expiry)
-
-Output (JSON):
-```json
-{ "ok": true, "permissionId": "..." }
-```
-
-Notes:
-- Use Porto’s `experimental_grantPermissions` as the source of truth for permission schema.
-
-### `agent-wallet porto send`
-Send calls through the Porto relay within granted permissions.
-
-Flags:
-- `--calls <json>`
-- `--chain-id <id>`
-
-Output (JSON):
-```json
-{ "ok": true, "txHash": "0x..." }
-```
-
-Notes:
-- Follow Porto’s prepared-call flow: `wallet_prepareCalls` (digest) + signer + `wallet_sendPreparedCalls`.
-
-### `agent-wallet porto permissions`
-List active permissions and expiry.
-
-Output (JSON):
-```json
-{ "ok": true, "permissions": [ ... ] }
-```
-
-## Shortcut CLI
-
-### `porto-wallet`
-Shim that forwards to `agent-wallet porto ...` for convenience.
-
 ## Testing (E2E)
-E2E tests must exercise the CLI surface (not just internal modules).
-
-Required flows:
-1. `agent-signer init` + `agent-signer pubkey`
-2. `agent-wallet porto onboard`
-3. `agent-wallet porto grant` + `agent-wallet porto permissions`
-4. `agent-wallet porto send` within limits (expected success)
-5. `agent-wallet porto send` outside limits (expected rejection)
+Required flows for target UX:
+1. `agent-wallet configure` creates/reuses account and grants agent key permissions.
+2. `agent-wallet status` shows account, permissions, and balances.
+3. `agent-wallet sign` succeeds for allowed calls.
+4. `agent-wallet sign` fails for disallowed calls.
+5. Non-interactive mode returns actionable errors for interactive-only paths.
 
 Notes:
-- Run on testnet by default.
-- Tests should emit machine-readable results (JSON).
-- Fail fast on missing permissions or invalid key handle.
+- Testnet-first on live networks.
+- Local deterministic tests allowed, but not a substitute for live integration checks.
 
-## Backends (Roadmap)
-- macOS Secure Enclave (v0)
-- Windows CNG / TPM
-- Linux TPM2
-- YubiKey (PKCS#11)
+## Current Implementation Note
+Current codebase contains a work-in-progress command shape (`signer` and `porto` subcommands).
+Given zero production users, compatibility is not required for the next iteration.
+
+## Next Iteration Checklist
+- [ ] Replace user-facing `porto` command group with `configure`, `sign`, `status`.
+- [ ] Introduce account profile model with alias + default selection.
+- [ ] Keep Porto adapter internal and non-primary in CLI docs/help.
+- [ ] Move Secure Enclave opaque handle storage from config to keychain item.
+- [ ] Add E2E coverage for new top-level command surface.

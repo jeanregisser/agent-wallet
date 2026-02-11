@@ -1,6 +1,29 @@
 {
   "name": "agent-wallet",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "agent-wallet": "dist/agent-wallet.js",
+    "porto-wallet": "dist/porto-wallet.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/agent-wallet.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "porto": "0.2.37",
+    "viem": "^2.37.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "execa": "^9.5.2",
+    "tsup": "^8.4.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.6"
+  }
 }

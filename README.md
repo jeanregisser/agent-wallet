@@ -16,14 +16,12 @@ Current code includes a functioning TypeScript scaffold with:
 - Porto onboarding/permissions/send integration
 - e2e test harness
 
-We will likely refactor command surface aggressively (no migration constraints yet).
-
 Security note:
 - Current implementation stores Secure Enclave opaque handle in config.
 - Follow-up: move this handle to OS keychain storage.
 
-## Intended CLI Surface
-Top-level commands (target):
+## CLI Surface
+Top-level commands:
 1. `agent-wallet configure`
 2. `agent-wallet sign`
 3. `agent-wallet status`
@@ -48,7 +46,7 @@ Porto should remain visible as "powered by Porto", but not drive primary command
 - Global flags: `--json` and `--human`.
 - `configure`: human-first, JSON available.
 - `sign`: JSON-first.
-- `status`: both human and JSON first-class.
+- `status`: human-first by default, JSON available.
 - Commands should use one logic path and separate renderers (machine output must stay clean on stdout in JSON mode).
 
 ## Design Principles
@@ -102,23 +100,17 @@ npm run typecheck
 npm run build
 ```
 
-Current WIP command surface:
+Current command surface:
 ```bash
-node dist/agent-wallet.js signer init
-node dist/agent-wallet.js signer pubkey
-node dist/agent-wallet.js porto onboard --testnet
-node dist/agent-wallet.js porto grant --defaults --calls '[{"to":"0xabc..."}]' --expiry 2026-12-31T00:00:00Z
-node dist/agent-wallet.js porto send --calls '[{"to":"0xabc...","data":"0x","value":"0x0"}]'
-node dist/agent-wallet.js porto permissions
+node dist/agent-wallet.js configure --calls '[{"to":"0xabc..."}]' --testnet
+node dist/agent-wallet.js sign --calls '[{"to":"0xabc...","data":"0x","value":"0x0"}]'
+node dist/agent-wallet.js status --human
 ```
 
 Spec source of truth:
 - `/Users/jean/src/github.com/jeanregisser/agent-wallet/docs/cli-spec.md`
 
 ## Near-Term Priorities
-- Implement new `configure/sign/status` top-level UX.
-- Keep Porto adapter internal.
 - Move signer handle persistence into keychain.
-- Add E2E coverage for the new top-level UX.
 - Add remote-admin bootstrap as a post-MVP mode.
 - Evaluate additional backend adapters later (e.g., ZeroDev, Privy, Para, others) if they improve the security/operability tradeoff.

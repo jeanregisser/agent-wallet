@@ -94,7 +94,7 @@ For MVP this is call-bundle oriented:
 - sign digest using local hardware-backed key
 - submit prepared calls
 
-Advanced/raw signing may stay available as an expert mode.
+Advanced/raw signing is out of scope for MVP.
 
 ### 3. `agent-wallet status`
 Inspection command.
@@ -131,7 +131,7 @@ Global output modes:
 Command defaults (MVP):
 - `configure`: human-first, with `--json` fully supported.
 - `sign`: json-first, with optional concise human summary.
-- `status`: both human and json are first-class.
+- `status`: human-first by default, with full `--json` parity.
 
 Implementation rules:
 - Commands must use a single business-logic path and separate renderers.
@@ -181,17 +181,23 @@ Required scenario set (concise but high-signal):
 Notes:
 - Testnet-first on live networks.
 - Local deterministic tests allowed, but not a substitute for live integration checks.
+- E2E files live under `test/e2e` and use the `*.e2e.ts` naming convention.
+- E2E tests run as the dedicated `e2e` Vitest project (no environment-variable gate).
 
 ## Current Implementation Note
-Current codebase contains a work-in-progress command shape (`signer` and `porto` subcommands).
-Given zero production users, compatibility is not required for the next iteration.
+Current codebase now exposes the top-level command surface:
+- `agent-wallet configure`
+- `agent-wallet sign`
+- `agent-wallet status`
+
+Porto remains an internal adapter and is not exposed as a dedicated CLI command group.
 
 ## Next Iteration Checklist
-- [ ] Replace user-facing `porto` command group with `configure`, `sign`, `status`.
+- [x] Replace user-facing `porto` command group with `configure`, `sign`, `status`.
 - [ ] Introduce account profile model with alias + default selection.
-- [ ] Keep Porto adapter internal and non-primary in CLI docs/help.
-- [ ] Implement global `--json` / `--human` output modes with per-command defaults.
+- [x] Keep Porto adapter internal and non-primary in CLI docs/help.
+- [x] Implement global `--json` / `--human` output modes with per-command defaults.
 - [ ] Move Secure Enclave opaque handle storage from config to keychain item.
-- [ ] Add E2E coverage for new top-level command surface.
+- [x] Add E2E coverage for new top-level command surface.
 - [ ] Add remote-admin bootstrap mode (out-of-band admin ceremony from separate device).
 - [ ] Evaluate additional backend adapters (e.g., ZeroDev, Privy, Para, others) using security/custody/lock-in criteria before adding support.

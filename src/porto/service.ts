@@ -1,5 +1,6 @@
 import { Chains, Mode, Porto } from 'porto'
 import * as WalletActions from 'porto/viem/WalletActions'
+import { createPublicClient, formatEther, http, type Chain } from 'viem'
 import * as WalletClient from 'porto/viem/WalletClient'
 import { waitForCallsStatus } from 'viem/actions'
 
@@ -49,6 +50,23 @@ type PermissionsOptions = {
 
 function getChain(testnet?: boolean) {
   return testnet ? Chains.baseSepolia : Chains.base
+}
+
+function getChainById(chainId?: number) {
+  if (!chainId) return undefined
+  if (chainId === Chains.base.id) return Chains.base
+  if (chainId === Chains.baseSepolia.id) return Chains.baseSepolia
+  return undefined
+}
+
+function resolveConfiguredChain(config: AgentWalletConfig, overrideChainId?: number): Chain | undefined {
+  const configured = getChainById(overrideChainId ?? config.porto?.chainId)
+  if (configured) return configured
+
+  if (config.porto?.testnet === true) return Chains.baseSepolia
+  if (config.porto?.testnet === false) return Chains.base
+
+  return undefined
 }
 
 function normalizeDialogHost(host?: string) {
@@ -359,6 +377,87 @@ export class PortoService {
       }
     } finally {
       session.close()
+    }
+  }
+
+  getChainDetails(chainId?: number) {
+    const chain = resolveConfiguredChain(this.config, chainId)
+    return chain
+      ? {
+          id: chain.id,
+          name: chain.name,
+        }
+      : undefined
+  }
+
+  async balance(options: { address?: `0x${string}`; chainId?: number }) {
+    const address = options.address ?? this.config.porto?.address
+    if (!address) {
+      throw new AppError('MISSING_ACCOUNT_ADDRESS', 'No account address configured. Run `agent-wallet configure` first.')
+    }
+
+    const chain = resolveConfiguredChain(this.config, options.chainId)
+    if (!chain) {
+      throw new AppError('MISSING_CHAIN_ID', 'No chain configured. Re-run configure with an explicit network.')
+    }
+
+    const rpcUrl = chain.rpcUrls.default.http[0]
+    if (!rpcUrl) {
+      throw new AppError('MISSING_RPC_URL', 'No default RPC URL is configured for the selected chain.', {
+        chainId: chain.id,
+      })
+    }
+
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(rpcUrl),
+    })
+
+    const balanceWei = await publicClient.getBalance({ address })
+
+    return {
+      address,
+      chainId: chain.id,
+      chainName: chain.name,
+      wei: balanceWei.toString(),
+      formatted: formatEther(balanceWei),
+      symbol: chain.nativeCurrency.symbol,
+    }
+  }
+
+  async deployment(options: { address?: `0x${string}`; chainId?: number }) {
+    const address = options.address ?? this.config.porto?.address
+    if (!address) {
+      throw new AppError('MISSING_ACCOUNT_ADDRESS', 'No account address configured. Run `agent-wallet configure` first.')
+    }
+
+    const chain = resolveConfiguredChain(this.config, options.chainId)
+    if (!chain) {
+      throw new AppError('MISSING_CHAIN_ID', 'No chain configured. Re-run configure with an explicit network.')
+    }
+
+    const rpcUrl = chain.rpcUrls.default.http[0]
+    if (!rpcUrl) {
+      throw new AppError('MISSING_RPC_URL', 'No default RPC URL is configured for the selected chain.', {
+        chainId: chain.id,
+      })
+    }
+
+    const publicClient = createPublicClient({
+      chain,
+      transport: http(rpcUrl),
+    })
+
+    const bytecode = await publicClient.getCode({
+      address,
+    })
+
+    return {
+      address,
+      chainId: chain.id,
+      chainName: chain.name,
+      deployed: Boolean(bytecode && bytecode !== '0x'),
+      bytecodeLength: bytecode ? (bytecode.length - 2) / 2 : 0,
     }
   }
 }

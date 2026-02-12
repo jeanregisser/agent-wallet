@@ -10,6 +10,9 @@ export type PayloadFormat = 'hex' | 'base64' | 'raw'
 const P256_SPKI_PREFIX =
   '3059301306072a8648ce3d020106082a8648ce3d030107034200'
 
+const KEY_NOT_INITIALIZED_MESSAGE =
+  'Signer key has not been initialized. Run `agent-wallet configure` first.'
+
 function getBackend(config: AgentWalletConfig): SignerBackend {
   if (config.signer.backend === 'secure-enclave') {
     return new MacOsSecureEnclaveBackend()
@@ -129,7 +132,7 @@ export class SignerService {
   async pubkey(format: PublicKeyFormat) {
     const handle = this.config.signer.handle
     if (!handle) {
-      throw new AppError('KEY_NOT_INITIALIZED', 'Signer key has not been initialized. Run `agent-wallet signer init` first.')
+      throw new AppError('KEY_NOT_INITIALIZED', KEY_NOT_INITIALIZED_MESSAGE)
     }
 
     const publicKey = await this.#backend.getPublicKey(handle)
@@ -143,7 +146,7 @@ export class SignerService {
   async sign(payload: string, format: PayloadFormat, hash: SignHashMode) {
     const handle = this.config.signer.handle
     if (!handle) {
-      throw new AppError('KEY_NOT_INITIALIZED', 'Signer key has not been initialized. Run `agent-wallet signer init` first.')
+      throw new AppError('KEY_NOT_INITIALIZED', KEY_NOT_INITIALIZED_MESSAGE)
     }
 
     const bytes = decodePayload(payload, format)
@@ -159,7 +162,7 @@ export class SignerService {
   async getPortoKey() {
     const handle = this.config.signer.handle
     if (!handle) {
-      throw new AppError('KEY_NOT_INITIALIZED', 'Signer key has not been initialized. Run `agent-wallet signer init` first.')
+      throw new AppError('KEY_NOT_INITIALIZED', KEY_NOT_INITIALIZED_MESSAGE)
     }
 
     const publicKey = await this.#backend.getPublicKey(handle)

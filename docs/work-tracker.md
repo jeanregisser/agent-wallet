@@ -2,14 +2,9 @@
 
 ## Handoff Snapshot (2026-02-11)
 - Branch: `main`
-- State intent: docs now reflect target product direction; code still uses transitional `signer` + `porto` subcommands.
+- State intent: top-level CLI surface is now `configure`, `sign`, `status`; Porto remains internal.
 
-Current implemented command surface (WIP):
-- `agent-wallet signer init|pubkey|sign|info`
-- `agent-wallet porto onboard|grant|send|permissions`
-- `porto-wallet` shim forwarding to `agent-wallet porto ...`
-
-Target command surface (next implementation phase):
+Current implemented command surface:
 - `agent-wallet configure`
 - `agent-wallet sign`
 - `agent-wallet status`
@@ -20,21 +15,23 @@ Canonical docs:
 - Agent workflow policy: `/Users/jean/src/github.com/jeanregisser/agent-wallet/AGENTS.md`
 
 Latest validation attempts on this machine:
-- `npm run typecheck` -> terminated by runtime (`Signal 9`)
-- `npm run build` -> terminated by runtime (`Signal 9`)
-- `npm run test` -> terminated by runtime (`Signal 9`)
+- `npm run typecheck` -> pass
+- `npm run build` -> pass
+- `npm run test` -> pass (unit project)
+- `npm run test:e2e` -> pass (4/4 scenario tests)
 
 Validation note:
-- Failures above appear environment/runtime-resource related, not assertion failures.
-- Next agent should rerun validation in a less constrained runtime before trusting green status.
+- Current e2e scenarios are deterministic contract checks for command surface/output/error invariants.
+- Live testnet happy-path execution still needs dedicated runs with interactive passkey ceremony.
 
 ## Now
-- Define and implement `configure`, `sign`, `status` top-level UX.
-- Implement scenario-based e2e suite: `configure.e2e`, `sign.e2e`, `status.e2e`, `non-interactive.e2e`.
+- Run scenario suite against live testnet and record happy-path + security invariants (`configure/sign/status/non-interactive`).
+- Tighten `configure` permission-profile persistence for explicit envelope reconciliation across reruns without requiring `--calls`.
 
 ## Next
 - Move Secure Enclave opaque handle storage from config into keychain item.
-- Run the scenario-based e2e suite on testnet and record stable pass/fail contract.
+- Introduce account profile model with alias + default selection.
+- Expand colocated unit coverage under `src/**` now that Vitest `unit` + `e2e` projects are split.
 
 ## Later
 - Remote-admin bootstrap (out-of-band admin ceremony from separate device).
@@ -43,3 +40,9 @@ Validation note:
 
 ## Done
 - Established security-model documentation in spec and README.
+- Replaced user-facing `porto` command group with `configure`, `sign`, `status`.
+- Removed expert `agent-wallet signer ...` subcommands from user-facing CLI.
+- Implemented global `--json` / `--human` output modes with per-command defaults.
+- Added scenario-based e2e files: `configure.e2e`, `sign.e2e`, `status.e2e`, `non-interactive.e2e`.
+- Upgraded test setup to Vitest `4.0.18` with explicit `unit` (colocated in `src`) and `e2e` (in `test`) projects.
+- Removed `AGENT_WALLET_E2E` gating and standardized e2e filenames to `*.e2e.ts`.

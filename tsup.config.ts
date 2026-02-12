@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/agent-wallet.ts', 'src/porto-wallet.ts'],
+  entry: ['src/agent-wallet.ts'],
   format: ['esm'],
   target: 'node22',
   sourcemap: true,

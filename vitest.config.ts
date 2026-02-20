@@ -6,15 +6,16 @@ export default defineConfig({
     projects: [
       {
         test: {
-          name: 'unit',
           include: ['src/**/*.test.ts'],
+          name: 'unit',
         },
       },
       {
         test: {
-          name: 'e2e',
+          fileParallelism: false,
           include: ['test/**/*.e2e.ts'],
-          testTimeout: 30_000,
+          name: 'e2e',
+          testTimeout: 4 * 60 * 1_000,
         },
       },
     ],

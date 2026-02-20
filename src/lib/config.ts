@@ -16,7 +16,16 @@ export type AgentWalletConfig = {
     dialogHost?: string
     testnet?: boolean
     permissionIds: `0x${string}`[]
-    latestPermissionId?: `0x${string}`
+    pendingPermission?: {
+      id: `0x${string}`
+      chainId: number
+      createdAt: string
+      expiry: number
+      calls: Array<{
+        to?: `0x${string}`
+        signature?: string
+      }>
+    }
     defaults?: {
       perTxUsd: number
       dailyUsd: number
@@ -70,6 +79,8 @@ export function loadConfig(): AgentWalletConfig {
 
   const raw = fs.readFileSync(configPath, 'utf8')
   const parsed = JSON.parse(raw) as Partial<AgentWalletConfig>
+  const parsedPorto: Partial<NonNullable<AgentWalletConfig['porto']>> = parsed.porto ?? {}
+  const parsedPending = parsedPorto.pendingPermission
 
   return {
     ...DEFAULT_CONFIG,
@@ -79,9 +90,34 @@ export function loadConfig(): AgentWalletConfig {
       ...parsed.signer,
     },
     porto: {
-      ...DEFAULT_CONFIG.porto,
-      ...parsed.porto,
-      permissionIds: parsed.porto?.permissionIds ?? [],
+      permissionIds: parsedPorto.permissionIds ?? [],
+      ...(parsedPorto.address ? { address: parsedPorto.address } : {}),
+      ...(typeof parsedPorto.chainId === 'number' ? { chainId: parsedPorto.chainId } : {}),
+      ...(parsedPorto.dialogHost ? { dialogHost: parsedPorto.dialogHost } : {}),
+      ...(typeof parsedPorto.testnet === 'boolean' ? { testnet: parsedPorto.testnet } : {}),
+      ...(parsedPending &&
+      typeof parsedPending === 'object' &&
+      typeof parsedPending.id === 'string' &&
+      typeof parsedPending.chainId === 'number' &&
+      typeof parsedPending.createdAt === 'string' &&
+      typeof parsedPending.expiry === 'number' &&
+      Array.isArray(parsedPending.calls)
+        ? {
+            pendingPermission: {
+              id: parsedPending.id as `0x${string}`,
+              chainId: parsedPending.chainId,
+              createdAt: parsedPending.createdAt,
+              expiry: parsedPending.expiry,
+              calls: parsedPending.calls
+                .filter((entry) => typeof entry === 'object' && entry !== null)
+                .map((entry) => ({
+                  ...(typeof entry.to === 'string' ? { to: entry.to as `0x${string}` } : {}),
+                  ...(typeof entry.signature === 'string' ? { signature: entry.signature } : {}),
+                })),
+            },
+          }
+        : {}),
+      ...(parsedPorto.defaults ? { defaults: parsedPorto.defaults } : {}),
     },
   }
 }

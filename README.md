@@ -31,9 +31,9 @@ Rationale:
 - `sign`: execute/sign actions within granted policy scope.
 - `status`: inspect account, key backend, permissions, and balance.
 
-MVP bootstrap scope:
-- Local-admin bootstrap only (configure and passkey admin ceremony on the same machine).
-- Remote-admin bootstrap (admin ceremony on separate device) is deferred to a later version.
+MVP setup scope:
+- Local-admin setup only (configure and passkey admin ceremony on the same machine).
+- Remote-admin setup (admin ceremony on separate device) is deferred to a later version.
 
 Porto should remain visible as "powered by Porto", but not drive primary command naming.
 
@@ -44,7 +44,7 @@ Porto should remain visible as "powered by Porto", but not drive primary command
 
 ## Output Strategy (MVP)
 - Global flags: `--json` and `--human`.
-- `configure`: human-first, JSON available.
+- `configure`: human-only interactive flow.
 - `sign`: JSON-first.
 - `status`: human-first by default, JSON available.
 - Commands should use one logic path and separate renderers (machine output must stay clean on stdout in JSON mode).
@@ -112,5 +112,5 @@ Spec source of truth:
 
 ## Near-Term Priorities
 - Move signer handle persistence into keychain.
-- Add remote-admin bootstrap as a post-MVP mode.
+- Add remote-admin setup as a post-MVP mode.
 - Evaluate additional backend adapters later (e.g., ZeroDev, Privy, Para, others) if they improve the security/operability tradeoff.

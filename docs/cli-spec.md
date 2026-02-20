@@ -22,7 +22,7 @@ Porto is currently the execution backend, but not the user-facing mental model.
 - Signer backend: real macOS Secure Enclave now; backend interface for future platforms.
 - Config path: platform-standard user config directory with `AGENT_WALLET_CONFIG_HOME` override.
 - Backend today: Porto.
-- Bootstrap mode for MVP: local-admin only (same device runs configure and passkey ceremony).
+- Setup mode for MVP: local-admin only (same device runs configure and passkey ceremony).
 - Security follow-up: move signer opaque handle from config into OS keychain storage.
 
 ## Security Model (Porto-Derived)
@@ -62,17 +62,19 @@ Three user-facing commands:
 Configures one account end-to-end:
 - create or reuse account
 - initialize/reuse local agent signing key
-- grant default permissions (with optional overrides)
-- optionally force account deployment/initialization transaction
+- grant default permissions (with optional overrides) using Porto precalls
+- report explicit permission state as `active_onchain` or `pending_activation`
 
 Expected characteristics:
 - idempotent when re-run
 - interactive by default
 - clear non-interactive error with required flags/hints
+- explicit human progress output with phase + step context
+- per-step operator guidance (`Now`, `You`, result, and next action on failure)
 
 MVP policy:
-- `configure` supports local-admin bootstrap only.
-- Remote-admin/out-of-band bootstrap (admin ceremony on another device) is explicitly deferred.
+- `configure` supports local-admin setup only.
+- Remote-admin/out-of-band setup (admin ceremony on another device) is explicitly deferred.
 
 Idempotency and recovery semantics (required):
 - `configure` must reconcile from partial state and converge to one valid target state.
@@ -80,11 +82,48 @@ Idempotency and recovery semantics (required):
 - `configure` should evaluate and repair these checkpoints in order:
 1. account selected or created
 2. local Secure Enclave agent key present and usable
-3. agent key authorized on account
-4. required permission envelope present and active (or renewed)
-5. optional deployment/initialization transaction completed (if requested)
+3. current permission state resolved (`active_onchain` vs `pending_activation` vs missing)
+4. agent key permission envelope prepared (or renewed) through precall grant when required
+5. required permission envelope state classified and persisted for reruns
+6. final state clearly reported as `active_onchain` or `pending_activation`
 - If execution stops mid-run, the next run should continue from remaining checkpoints instead of restarting everything.
-- `configure` should emit structured status per checkpoint (`already_ok`, `created`, `updated`, `skipped`, `failed`) to make recovery observable for agents.
+- `configure` should report step outcomes with checkpoint statuses (`already_ok`, `created`, `updated`, `skipped`, `failed`) in the human flow summary.
+- checkpoint identifiers in output are:
+  - `account`
+  - `agent_key`
+  - `permission_state`
+  - `permission_preparation`
+  - `permission_classification`
+  - `outcome`
+- `configure` should run as explicit linear phases:
+1. account + signer readiness
+2. permission reconciliation and precall preparation
+3. state classification and operator guidance
+- each step should print:
+  - phase/step position
+  - what is happening now
+  - what the human must do (or that no action is required)
+  - success/failure for that step
+  - actionable next step if failed
+- MVP interaction rule: once an account address is configured, permission reads/reconciliation must not trigger a new dialog connect just to inspect state.
+- Current MVP implementation resolves active permissions from Relay key state (`wallet_getKeys`) for non-interactive reconciliation and send-path selection; locally persisted `permissionIds` are treated as cache only (no `latestPermissionId` pointer is used).
+- `configure` is Porto-precall-first: it should not require funding or a direct activation send during setup.
+- `configure` should avoid hidden fallback behavior and report explicit state outcomes.
+- `configure` should not enqueue duplicate precalls for the same desired permission envelope on rerun.
+- `configure` must not add hidden self-call allowances to the granted calls envelope.
+- `configure` should reject insecure broad self-call entries (`to: <account-address>` without a specific selector/signature) with an actionable error.
+- If desired permissions changed while previous setup is still pending, `configure` may queue a new precall but must report queueing risk and current state clearly.
+- `configure` output must always include an explicit state line:
+  - `active_onchain`: Relay `wallet_getKeys` confirms agent permissions are active onchain.
+  - `pending_activation`: grant/precall completed, but Relay does not yet show active onchain permission.
+- Deferred activation model: first successful real send may consume matching precalls and transition state to `active_onchain`.
+
+Porto precall semantics (operator-facing):
+- `wallet_grantPermissions` in configure prepares permission intent without requiring an immediate onchain send.
+- Relay key reads (`wallet_getKeys`) reflect active onchain key state, not every queued precall intent.
+- Configure persists one local `pendingPermission` record to keep reruns idempotent and avoid duplicate precall grants for the same envelope.
+- First matching allowlisted `agent-wallet sign` send can consume prepared precalls and activate the permission onchain.
+- If permission intent changes before activation, configure may enqueue a newer precall and should report that state as `pending_activation` until Relay key state confirms activation.
 
 ### 2. `agent-wallet sign`
 Agent execution/signing command.
@@ -93,6 +132,8 @@ For MVP this is call-bundle oriented:
 - prepare calls
 - sign digest using local hardware-backed key
 - submit prepared calls
+- return both relay bundle id and send status
+- avoid ambiguity between relay and chain identifiers: `bundleId` is relay-only, `txHash` is onchain-only
 
 Advanced/raw signing is out of scope for MVP.
 
@@ -102,9 +143,14 @@ Inspection command.
 Should include:
 - active account/profile
 - backend/provider in use
+- activation state (`active_onchain`, `pending_activation`, or `unconfigured`)
 - key backend health
 - granted permissions summary + expiry
 - balance snapshot per configured chain
+
+MVP status behavior:
+- `status` permission summary is derived from Relay key state and does not initiate a dialog connect.
+- If no active agent permission is found on Relay, permissions summary reports zero and should be interpreted as unconfigured/expired until `configure` grants/renews one.
 
 ## Account Model
 - Multiple accounts are first-class in the data model.
@@ -129,7 +175,7 @@ Global output modes:
 - `--human`: operator-friendly output (tables/messages).
 
 Command defaults (MVP):
-- `configure`: human-first, with `--json` fully supported.
+- `configure`: human-only interactive flow (progress text is the contract).
 - `sign`: json-first, with optional concise human summary.
 - `status`: human-first by default, with full `--json` parity.
 
@@ -138,6 +184,7 @@ Implementation rules:
 - JSON mode writes only JSON to stdout.
 - Human logs/progress/spinners must not be mixed into JSON stdout.
 - Errors must preserve structured codes/details in JSON mode.
+- `configure` is an exception: it is human-output only and should reject `--json`.
 
 ## Error Model
 All command failures return:
@@ -165,9 +212,9 @@ Strategy:
 Required scenario set (concise but high-signal):
 1. `configure.e2e`
 - Happy path: creates or reuses account and grants agent key permissions.
-- Security invariant: resulting permissions are scoped and active.
+- Security invariant: resulting permissions are scoped; state is explicitly reported as `active_onchain` or `pending_activation`.
 - Recovery invariant: rerun is idempotent and does not duplicate keys/grants.
-- Output invariant: checkpoint statuses are machine-readable in JSON mode.
+- Output invariant: human flow markers appear in order (phase/step/now/result), include state classification, and include actionable guidance.
 2. `sign.e2e`
 - Happy path: allowed call succeeds.
 - Security invariant: disallowed call fails with structured error code.
@@ -179,10 +226,18 @@ Required scenario set (concise but high-signal):
 - Invariant: interactive-only operations fail fast with actionable structured error in non-interactive contexts.
 
 Notes:
-- Testnet-first on live networks.
-- Local deterministic tests allowed, but not a substitute for live integration checks.
+- E2E defaults to testnet (Base Sepolia + faucet funding) for automation reliability, with optional prod override for manual smoke checks.
 - E2E files live under `test/e2e` and use the `*.e2e.ts` naming convention.
-- E2E tests run as the dedicated `e2e` Vitest project (no environment-variable gate).
+- E2E tests run as the dedicated `e2e` Vitest project.
+- E2E scenarios run in live mode only.
+- `configure` happy-path e2e must automate the full browser passkey ceremony.
+- Browser passkey automation uses Playwright virtual authenticators (`WebAuthn.addVirtualAuthenticator`) so registration + assertion are exercised in tests.
+- Current test defaults:
+  - `AGENT_WALLET_E2E_NETWORK=testnet` (default when unset)
+  - optional `AGENT_WALLET_E2E_NETWORK=prod` override
+  - optional `AGENT_WALLET_E2E_DIALOG_HOST=<host>` override
+  - optional `AGENT_WALLET_E2E_HEADLESS=0` to run browser visibly for manual debugging
+  - optional `AGENT_WALLET_E2E_STRICT_DIALOG=0` to tolerate non-actionable follow-up dialog URLs (debug-only)
 
 ## Current Implementation Note
 Current codebase now exposes the top-level command surface:
@@ -199,5 +254,5 @@ Porto remains an internal adapter and is not exposed as a dedicated CLI command 
 - [x] Implement global `--json` / `--human` output modes with per-command defaults.
 - [ ] Move Secure Enclave opaque handle storage from config to keychain item.
 - [x] Add E2E coverage for new top-level command surface.
-- [ ] Add remote-admin bootstrap mode (out-of-band admin ceremony from separate device).
+- [ ] Add remote-admin setup mode (out-of-band admin ceremony from separate device).
 - [ ] Evaluate additional backend adapters (e.g., ZeroDev, Privy, Para, others) using security/custody/lock-in criteria before adding support.

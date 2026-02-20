@@ -11,7 +11,7 @@
     "dev": "tsx src/agent-wallet.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --project unit",
-    "test:e2e": "vitest run --project e2e",
+    "test:e2e": "npm run build && vitest run --project e2e",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -20,8 +20,10 @@
     "viem": "^2.37.13"
   },
   "devDependencies": {
+    "@vitest/browser-playwright": "^4.0.18",
     "@types/node": "^22.13.4",
     "execa": "^9.5.2",
+    "playwright": "^1.56.1",
     "tsup": "^8.4.0",
     "tsx": "^4.20.3",
     "typescript": "^5.7.3",

@@ -10,6 +10,9 @@
 - If product direction changes, update `docs/cli-spec.md` first, then implementation.
 - Update `README.md` only for overview/onboarding/status changes.
 
+## Commit Style
+- Do not add a `Co-Authored-By` trailer to commits.
+
 ## Iteration Hygiene
 - At the end of each working session, update `docs/work-tracker.md` with remaining work and newly completed items.
 - Keep checklist items short, concrete, and testable.

@@ -26,6 +26,12 @@ type OnboardOptions = {
   nonInteractive?: boolean
   testnet?: boolean
   createAccount?: boolean
+  grantOptions?: {
+    calls: string
+    defaults?: boolean
+    expiry?: string
+    spendLimit?: number
+  }
 }
 
 type GrantOptions = {
@@ -491,6 +497,31 @@ export class PortoService {
     private readonly signer: SignerService,
   ) {}
 
+  private async buildGrantPermissionsParam(
+    chain: ReturnType<typeof getChain>,
+    grantOptions: NonNullable<OnboardOptions['grantOptions']>,
+  ) {
+    const key = await this.signer.getPortoKey()
+    const defaults = Boolean(grantOptions.defaults)
+    const callPermissions = parseGrantCalls(grantOptions.calls, defaults)
+    const perTxUsd = grantOptions.spendLimit ?? 25
+    const dailyUsd = 100
+    const feeTokenSymbol = chain.id === Chains.baseSepolia.id ? 'EXP' : 'native'
+    return {
+      expiry: getUnixExpirySeconds(grantOptions.expiry, defaults),
+      feeToken: defaults
+        ? ({ limit: String(perTxUsd) as `${number}`, symbol: feeTokenSymbol })
+        : null,
+      key,
+      permissions: {
+        calls: callPermissions,
+        ...(defaults
+          ? { spend: [{ limit: BigInt(Math.round(dailyUsd * 1_000_000)), period: 'day' as const }] }
+          : {}),
+      },
+    }
+  }
+
   private async listAgentPermissions(options: {
     address?: `0x${string}`
     chainId?: number
@@ -621,17 +652,28 @@ export class PortoService {
         throw error
       }
 
+      const grantPermissionsParam = options.grantOptions
+        ? await this.buildGrantPermissionsParam(chain, options.grantOptions)
+        : undefined
+
       const response = await WalletActions.connect(session.client, {
         chainIds: [chain.id],
         ...(options.createAccount
           ? { createAccount: true }
           : { selectAccount: true }),
+        ...(grantPermissionsParam ? { grantPermissions: grantPermissionsParam } : {}),
       })
 
       const account = response.accounts[0]
       if (!account?.address) {
         throw new AppError('ONBOARD_FAILED', 'Porto onboarding did not return an account address.')
       }
+
+      const grantedPermission = grantPermissionsParam
+        ? (response.accounts[0]?.capabilities?.permissions?.find(
+            (p) => p.key.publicKey.toLowerCase() === grantPermissionsParam.key.publicKey.toLowerCase(),
+          ) ?? null)
+        : null
 
       // Align with Porto CLI UX: notify dialog of success so the web page
       // can render a completion state instead of staying idle/blank.
@@ -651,22 +693,41 @@ export class PortoService {
         // Non-fatal for onboard result; CLI output remains source of truth.
       }
 
+      const addressChanged =
+        this.config.porto?.address &&
+        this.config.porto.address.toLowerCase() !== account.address.toLowerCase()
+
+      const existingPermissionIds = addressChanged ? [] : (this.config.porto?.permissionIds ?? [])
+      const permissionIds = grantedPermission
+        ? (Array.from(new Set([...existingPermissionIds, grantedPermission.id])) as `0x${string}`[])
+        : existingPermissionIds
+
+      const defaults = options.grantOptions?.defaults
       this.config.porto = {
         ...this.config.porto,
         address: account.address,
         chainId: chain.id,
         dialogHost: normalizeDialogHost(options.dialogHost),
         testnet: Boolean(options.testnet),
-        permissionIds:
-          this.config.porto?.address &&
-          this.config.porto.address.toLowerCase() !== account.address.toLowerCase()
-            ? []
-            : this.config.porto?.permissionIds ?? [],
+        permissionIds,
+        ...(grantedPermission && defaults
+          ? {
+              defaults: {
+                perTxUsd: options.grantOptions?.spendLimit ?? 25,
+                dailyUsd: 100,
+                expiryDays: 7,
+                allowlistRequired: true,
+              },
+            }
+          : {}),
       }
 
       return {
         address: account.address,
         chainId: chain.id,
+        grantedPermission: grantedPermission
+          ? { id: grantedPermission.id, expiry: grantedPermission.expiry }
+          : null,
       }
     } finally {
       session?.close()
@@ -674,11 +735,11 @@ export class PortoService {
   }
 
   async grant(options: GrantOptions) {
-      const session = await getWalletClient({
-        address: options.address ?? this.config.porto?.address,
-        dialogHost: this.config.porto?.dialogHost,
-        testnet: this.config.porto?.testnet,
-      })
+    const session = await getWalletClient({
+      address: options.address ?? this.config.porto?.address,
+      dialogHost: this.config.porto?.dialogHost,
+      testnet: this.config.porto?.testnet,
+    })
 
     try {
       const key = await this.signer.getPortoKey()
@@ -687,66 +748,52 @@ export class PortoService {
       const address = options.address ?? this.config.porto?.address
       const chain = resolveConfiguredChain(this.config, options.chainId)
 
-      await WalletActions.connect(session.client, {
-        ...(chain ? { chainIds: [chain.id] } : {}),
-        ...(address
-          ? {
-              selectAccount: {
-                address,
-              },
-            }
-          : { selectAccount: true }),
-      })
-
       const perTxUsd = options.spendLimit ?? 25
       const dailyUsd = 100
       const feeTokenSymbol = chain?.id === Chains.baseSepolia.id ? 'EXP' : 'native'
 
-      const response = await WalletActions.grantPermissions(session.client, {
-        address,
-        chainId: options.chainId,
-        expiry: getUnixExpirySeconds(options.expiry, defaults),
-        feeToken: defaults
-          ? {
-              limit: String(perTxUsd) as `${number}`,
-              symbol: feeTokenSymbol,
-            }
-          : null,
-        key,
-        permissions: {
-          calls: callPermissions,
-          ...(defaults
-            ? {
-                spend: [
-                  {
-                    limit: BigInt(Math.round(dailyUsd * 1_000_000)),
-                    period: 'day' as const,
-                  },
-                ],
-              }
-            : {}),
+      // Combine sign-in and permission grant into a single wallet_connect call
+      // so the user only needs one dialog interaction instead of two.
+      const connectResponse = await WalletActions.connect(session.client, {
+        ...(chain ? { chainIds: [chain.id] } : {}),
+        ...(address ? { selectAccount: { address } } : { selectAccount: true }),
+        grantPermissions: {
+          expiry: getUnixExpirySeconds(options.expiry, defaults),
+          feeToken: defaults
+            ? ({ limit: String(perTxUsd) as `${number}`, symbol: feeTokenSymbol })
+            : null,
+          key,
+          permissions: {
+            calls: callPermissions,
+            ...(defaults
+              ? { spend: [{ limit: BigInt(Math.round(dailyUsd * 1_000_000)), period: 'day' as const }] }
+              : {}),
+          },
         },
       })
+
+      const grantedPermission = connectResponse.accounts[0]?.capabilities?.permissions?.find(
+        (p) => p.key.publicKey.toLowerCase() === key.publicKey.toLowerCase(),
+      )
+
+      if (!grantedPermission) {
+        throw new AppError('GRANT_FAILED', 'Porto did not return a granted permission.')
+      }
 
       this.config.porto = {
         ...this.config.porto,
         permissionIds: Array.from(
-          new Set([...(this.config.porto?.permissionIds ?? []), response.id]),
+          new Set([...(this.config.porto?.permissionIds ?? []), grantedPermission.id]),
         ) as `0x${string}`[],
         defaults: defaults
-          ? {
-              perTxUsd,
-              dailyUsd,
-              expiryDays: 7,
-              allowlistRequired: true,
-            }
+          ? { perTxUsd, dailyUsd, expiryDays: 7, allowlistRequired: true }
           : this.config.porto?.defaults,
       }
 
       return {
-        permissionId: response.id,
-        expiry: response.expiry,
-        key: response.key,
+        permissionId: grantedPermission.id,
+        expiry: grantedPermission.expiry,
+        key: grantedPermission.key,
       }
     } finally {
       session.close()

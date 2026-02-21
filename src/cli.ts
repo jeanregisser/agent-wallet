@@ -653,7 +653,9 @@ async function runConfigureFlow(parameters: {
   const checkpoints: ConfigureCheckpoint[] = []
   let address = config.porto?.address
   let chainId = config.porto?.chainId
-  let requestedCallAllowlist: readonly GrantCallPermission[] | undefined
+  const requestedCallAllowlist: readonly GrantCallPermission[] | undefined = options.calls
+    ? parseCallsAllowlist(options.calls)
+    : undefined
   let requiresGrant = false
   let grantedPermissionId: `0x${string}` | undefined
   let activePermission: PermissionSnapshot | null = null
@@ -663,51 +665,6 @@ async function runConfigureFlow(parameters: {
 
   process.stdout.write('Configure wallet (local-admin setup)\n')
   process.stdout.write('Powered by Porto\n\n')
-
-  await runConfigureStep({
-    checkpoint: 'account',
-    checkpoints,
-    mode,
-    now: 'Connect an existing account or create a new smart account.',
-    phase: 1,
-    phaseTitle: 'Account & Key',
-    run: async () => {
-      const hadConfiguredAccount = Boolean(address)
-      const shouldOnboard = Boolean(options.createAccount) || !address
-      if (shouldOnboard) {
-        const onboardResult = await porto.onboard({
-          createAccount: options.createAccount,
-          dialogHost: options.dialog,
-          headless: options.headless,
-          nonInteractive: !isInteractive(),
-          testnet: options.testnet,
-        })
-        address = onboardResult.address
-        chainId = onboardResult.chainId
-        saveConfig(config)
-        return {
-          details: {
-            address,
-            chainId,
-          },
-          status: hadConfiguredAccount ? 'updated' : 'created',
-          summary: `Account ready at ${address} on chain ${String(chainId)}.`,
-        }
-      }
-
-      return {
-        details: {
-          address,
-          chainId,
-        },
-        status: 'already_ok',
-        summary: `Using configured account ${address}.`,
-      }
-    },
-    step: 1,
-    title: 'Account selection',
-    you: 'Approve the passkey prompt in your browser dialog.',
-  })
 
   await runConfigureStep({
     checkpoint: 'agent_key',
@@ -729,9 +686,92 @@ async function runConfigureFlow(parameters: {
         summary: `Secure Enclave key ${initialized.created ? 'created' : 'already exists'} (${initialized.keyId}).`,
       }
     },
-    step: 2,
+    step: 1,
     title: 'Agent key readiness',
     you: 'No manual action unless macOS asks for keychain/biometric confirmation.',
+  })
+
+  await runConfigureStep({
+    checkpoint: 'account',
+    checkpoints,
+    mode,
+    now: 'Connect or create a smart account and grant agent permissions.',
+    phase: 1,
+    phaseTitle: 'Account & Key',
+    run: async () => {
+      const hadConfiguredAccount = Boolean(address)
+      const shouldOnboard = Boolean(options.createAccount) || !address
+      if (shouldOnboard) {
+        const spendLimit = parseSpendLimit(options.spendLimit) ?? config.porto?.defaults?.perTxUsd ?? DEFAULT_PERMISSION_PER_TX_USD
+        const onboardResult = await porto.onboard({
+          createAccount: options.createAccount,
+          dialogHost: options.dialog,
+          headless: options.headless,
+          nonInteractive: !isInteractive(),
+          testnet: options.testnet,
+          ...(requestedCallAllowlist
+            ? {
+                grantOptions: {
+                  calls: JSON.stringify(requestedCallAllowlist),
+                  defaults: true,
+                  expiry: options.expiry,
+                  spendLimit,
+                },
+              }
+            : {}),
+        })
+        address = onboardResult.address
+        chainId = onboardResult.chainId
+
+        if (onboardResult.grantedPermission && requestedCallAllowlist) {
+          const { id: permissionId, expiry } = onboardResult.grantedPermission
+          const resolvedChainId = chainId ?? config.porto?.chainId
+          if (!resolvedChainId) {
+            throw new AppError('MISSING_CHAIN_ID', 'No chain configured. Re-run configure with an explicit network.')
+          }
+          assertSecureAllowlist(requestedCallAllowlist, address)
+          grantedPermissionId = permissionId
+          permissionUpdated = true
+          ensurePermissionIdList(config, permissionId)
+          config.porto = {
+            ...config.porto,
+            permissionIds: config.porto?.permissionIds ?? [],
+            pendingPermission: {
+              id: permissionId,
+              chainId: resolvedChainId,
+              createdAt: new Date().toISOString(),
+              expiry,
+              calls: requestedCallAllowlist.map((entry) => ({
+                ...(entry.to ? { to: entry.to } : {}),
+                ...(entry.signature ? { signature: entry.signature } : {}),
+              })),
+            },
+          }
+        }
+
+        saveConfig(config)
+        return {
+          details: {
+            address,
+            chainId,
+          },
+          status: hadConfiguredAccount ? 'updated' : 'created',
+          summary: `Account ready at ${address} on chain ${String(chainId)}.`,
+        }
+      }
+
+      return {
+        details: {
+          address,
+          chainId,
+        },
+        status: 'already_ok',
+        summary: `Using configured account ${address}.`,
+      }
+    },
+    step: 2,
+    title: 'Account & permissions',
+    you: 'Approve the passkey and permissions in your browser dialog.',
   })
 
   if (!address) {
@@ -751,7 +791,6 @@ async function runConfigureFlow(parameters: {
     phase: 2,
     phaseTitle: 'Permissions',
     run: async () => {
-      requestedCallAllowlist = options.calls ? parseCallsAllowlist(options.calls) : undefined
       if (requestedCallAllowlist) {
         assertSecureAllowlist(requestedCallAllowlist, configuredAddress)
       }

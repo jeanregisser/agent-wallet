@@ -40,17 +40,9 @@ describe('e2e flow', () => {
       const configureDialogLine = await configure.waitFor(DIALOG_URL_PATTERN, 60_000)
       await page.goto(extractDialogUrl(configureDialogLine)!, { waitUntil: 'domcontentloaded' })
 
-      // wallet_connect (createAccount): sign-up triggers the passkey ceremony;
-      // WebAuthn virtual authenticator auto-responds.
+      // wallet_connect(createAccount + grantPermissions): sign-up triggers the passkey ceremony
+      // and approves the permission grant in one step; WebAuthn virtual authenticator auto-responds.
       await page.getByTestId('sign-up').click()
-      // wallet_connect (selectAccount): the grant step authenticates the account first.
-      await page.getByTestId('sign-in').click()
-      // wallet_grantPermissions: faucet may appear on testnet before the grant button.
-      const faucetBtn = page.getByTestId('add-faucet-funds')
-      if (await faucetBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
-        await faucetBtn.click()
-      }
-      await page.getByTestId('grant').click()
 
       const configureResult = await configure.done()
       expect(
@@ -137,8 +129,8 @@ describe('e2e flow', () => {
       const rerunDialogLine = await rerun.waitFor(DIALOG_URL_PATTERN, 15_000).catch(() => null)
       if (rerunDialogLine) {
         await page.goto(extractDialogUrl(rerunDialogLine)!, { waitUntil: 'domcontentloaded' })
+        // wallet_connect(selectAccount + grantPermissions): one click handles sign-in and permission grant.
         await page.getByTestId('sign-in').click()
-        await page.getByTestId('grant').click()
       }
 
       const rerunResult = await rerun.done()

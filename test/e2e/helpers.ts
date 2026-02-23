@@ -281,7 +281,7 @@ export function extractDialogUrl(line: string): string | null {
 }
 
 export function buildConfigureArgs(parameters: {
-  allowlistTo: `0x${string}`
+  allowlistTo?: `0x${string}`
   createAccount?: boolean
   dialogHost?: string
   mode: 'human' | 'json'
@@ -289,8 +289,9 @@ export function buildConfigureArgs(parameters: {
 }): string[] {
   const { allowlistTo, createAccount, dialogHost, mode, network } = parameters
 
-  const args = ['configure', '--headless', `--${mode}`, '--calls', JSON.stringify([{ to: allowlistTo }])]
+  const args = ['configure', `--${mode}`]
 
+  if (allowlistTo) args.push('--to', allowlistTo)
   if (createAccount) args.push('--create-account')
   if (network === 'testnet') args.push('--testnet')
   if (dialogHost) args.push('--dialog', dialogHost)

@@ -9,10 +9,16 @@ import { parseJsonFlag } from '../lib/encoding.js'
 import type { AgentWalletConfig } from '../lib/config.js'
 import type { SignerService } from '../signer/service.js'
 
-type GrantCallPermission = {
-  to?: `0x${string}`
-  signature?: string
-}
+// TODO: Replace with user-configurable permission spec (interactive or flag-based).
+// See docs/permissions-plan.md for the planned approach.
+//
+// These wildcard values grant the agent permission to call any contract with any
+// function. Spend limits and expiry below provide the primary risk boundaries.
+const DEFAULT_GRANT_ANY_TARGET = '0x3232323232323232323232323232323232323232' as `0x${string}`
+const DEFAULT_GRANT_ANY_SELECTOR = '0x32323232' as `0x${string}`
+const DEFAULT_GRANT_EXPIRY_DAYS = 7
+const DEFAULT_GRANT_DAILY_USD = 100
+const DEFAULT_GRANT_PER_TX_USD = 25
 
 type SendCall = {
   data?: `0x${string}`
@@ -21,26 +27,16 @@ type SendCall = {
 }
 
 type OnboardOptions = {
-  dialogHost?: string
-  headless?: boolean
-  nonInteractive?: boolean
-  testnet?: boolean
+  callTargets?: readonly `0x${string}`[]
   createAccount?: boolean
-  grantOptions?: {
-    calls: string
-    defaults?: boolean
-    expiry?: string
-    spendLimit?: number
-  }
+  dialogHost?: string
+  testnet?: boolean
 }
 
 type GrantOptions = {
   address?: `0x${string}`
+  callTargets?: readonly `0x${string}`[]
   chainId?: number
-  expiry?: string
-  spendLimit?: number
-  calls?: string
-  defaults?: boolean
 }
 
 type SendOptions = {
@@ -183,6 +179,44 @@ function isRelayKeyRecord(value: unknown): value is RelayKeyRecord {
   if (value.type !== 'p256' && value.type !== 'secp256k1' && value.type !== 'webauthnp256') return false
   if (!Array.isArray(value.permissions)) return false
   return true
+}
+
+function parseSendCalls(calls: string) {
+  const parsed = parseJsonFlag<SendCall[]>(calls, 'INVALID_CALLS_JSON')
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new AppError('INVALID_CALLS_JSON', 'Send calls must be a non-empty JSON array.')
+  }
+
+  return parsed.map((call) => {
+    if (!call.to) {
+      throw new AppError('INVALID_CALLS_JSON', 'Each send call must include a `to` address.')
+    }
+
+    let value: bigint | undefined
+    if (call.value !== undefined) {
+      try {
+        value = typeof call.value === 'bigint' ? call.value : BigInt(call.value)
+      } catch {
+        throw new AppError(
+          'INVALID_CALLS_JSON',
+          'Each send call `value` must be a non-negative integer (decimal or 0x hex).',
+        )
+      }
+
+      if (value < 0n) {
+        throw new AppError(
+          'INVALID_CALLS_JSON',
+          'Each send call `value` must be a non-negative integer (decimal or 0x hex).',
+        )
+      }
+    }
+
+    return {
+      ...call,
+      ...(value !== undefined ? { value } : {}),
+    }
+  })
 }
 
 let relayRequestId = 0
@@ -411,86 +445,6 @@ export function closeWalletSession() {
   sharedWalletSession = undefined
 }
 
-function getUnixExpirySeconds(expiry?: string, defaults = false) {
-  if (expiry) {
-    const timestamp = Date.parse(expiry)
-    if (Number.isNaN(timestamp)) {
-      throw new AppError('INVALID_EXPIRY', 'Expiry must be a valid ISO-8601 timestamp.', {
-        expiry,
-      })
-    }
-    return Math.floor(timestamp / 1000)
-  }
-
-  if (defaults) {
-    const secondsInDay = 24 * 60 * 60
-    return Math.floor(Date.now() / 1000) + 7 * secondsInDay
-  }
-
-  throw new AppError('MISSING_EXPIRY', 'Missing required flag --expiry <iso8601>.')
-}
-
-function parseGrantCalls(calls?: string, defaults = false) {
-  if (!calls) {
-    const code = defaults ? 'MISSING_CALL_ALLOWLIST' : 'MISSING_CALLS'
-    throw new AppError(code, 'Grant permissions requires --calls with at least one allowlisted target.')
-  }
-
-  const parsed = parseJsonFlag<GrantCallPermission[]>(calls, 'INVALID_CALLS_JSON')
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new AppError('INVALID_CALLS_JSON', 'Grant calls must be a non-empty JSON array.')
-  }
-
-  return parsed.map((entry) => {
-    if (!entry.to && !entry.signature) {
-      throw new AppError(
-        'INVALID_CALLS_JSON',
-        'Each grant permission entry must include at least one of `to` or `signature`.',
-      )
-    }
-
-    return entry
-  }) as readonly ({ to: `0x${string}`; signature?: string } | { signature: string; to?: `0x${string}` })[]
-}
-
-function parseSendCalls(calls: string) {
-  const parsed = parseJsonFlag<SendCall[]>(calls, 'INVALID_CALLS_JSON')
-
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new AppError('INVALID_CALLS_JSON', 'Send calls must be a non-empty JSON array.')
-  }
-
-  return parsed.map((call) => {
-    if (!call.to) {
-      throw new AppError('INVALID_CALLS_JSON', 'Each send call must include a `to` address.')
-    }
-
-    let value: bigint | undefined
-    if (call.value !== undefined) {
-      try {
-        value = typeof call.value === 'bigint' ? call.value : BigInt(call.value)
-      } catch {
-        throw new AppError(
-          'INVALID_CALLS_JSON',
-          'Each send call `value` must be a non-negative integer (decimal or 0x hex).',
-        )
-      }
-
-      if (value < 0n) {
-        throw new AppError(
-          'INVALID_CALLS_JSON',
-          'Each send call `value` must be a non-negative integer (decimal or 0x hex).',
-        )
-      }
-    }
-
-    return {
-      ...call,
-      ...(value !== undefined ? { value } : {}),
-    }
-  })
-}
-
 export class PortoService {
   constructor(
     private readonly config: AgentWalletConfig,
@@ -499,25 +453,23 @@ export class PortoService {
 
   private async buildGrantPermissionsParam(
     chain: ReturnType<typeof getChain>,
-    grantOptions: NonNullable<OnboardOptions['grantOptions']>,
+    callTargets?: readonly `0x${string}`[],
   ) {
+    // TODO: Replace with a richer user-configurable permission spec (interactive or flag-based).
+    // See docs/permissions-plan.md for the planned approach.
     const key = await this.signer.getPortoKey()
-    const defaults = Boolean(grantOptions.defaults)
-    const callPermissions = parseGrantCalls(grantOptions.calls, defaults)
-    const perTxUsd = grantOptions.spendLimit ?? 25
-    const dailyUsd = 100
     const feeTokenSymbol = chain.id === Chains.baseSepolia.id ? 'EXP' : 'native'
+    const calls =
+      callTargets && callTargets.length > 0
+        ? callTargets.map((to) => ({ to }))
+        : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
     return {
-      expiry: getUnixExpirySeconds(grantOptions.expiry, defaults),
-      feeToken: defaults
-        ? ({ limit: String(perTxUsd) as `${number}`, symbol: feeTokenSymbol })
-        : null,
+      expiry: Math.floor(Date.now() / 1000) + DEFAULT_GRANT_EXPIRY_DAYS * 24 * 60 * 60,
+      feeToken: { limit: String(DEFAULT_GRANT_PER_TX_USD) as `${number}`, symbol: feeTokenSymbol },
       key,
       permissions: {
-        calls: callPermissions,
-        ...(defaults
-          ? { spend: [{ limit: BigInt(Math.round(dailyUsd * 1_000_000)), period: 'day' as const }] }
-          : {}),
+        calls,
+        spend: [{ limit: BigInt(Math.round(DEFAULT_GRANT_DAILY_USD * 1_000_000)), period: 'day' as const }],
       },
     }
   }
@@ -619,17 +571,6 @@ export class PortoService {
   }
 
   async onboard(options: OnboardOptions) {
-    if (options.nonInteractive && !options.headless) {
-      throw new AppError(
-        'NON_INTERACTIVE_REQUIRES_FLAGS',
-        'Command requires an interactive TTY. Re-run with explicit flags or --headless.',
-        {
-          command: 'agent-wallet porto onboard',
-          hint: 'Use --headless in CI/agent environments.',
-        },
-      )
-    }
-
     const chain = getChain(options.testnet)
     let session: Awaited<ReturnType<typeof getWalletClient>> | undefined
     try {
@@ -652,16 +593,14 @@ export class PortoService {
         throw error
       }
 
-      const grantPermissionsParam = options.grantOptions
-        ? await this.buildGrantPermissionsParam(chain, options.grantOptions)
-        : undefined
+      const grantPermissionsParam = await this.buildGrantPermissionsParam(chain, options.callTargets)
 
       const response = await WalletActions.connect(session.client, {
         chainIds: [chain.id],
         ...(options.createAccount
           ? { createAccount: true }
           : { selectAccount: true }),
-        ...(grantPermissionsParam ? { grantPermissions: grantPermissionsParam } : {}),
+        grantPermissions: grantPermissionsParam,
       })
 
       const account = response.accounts[0]
@@ -669,11 +608,9 @@ export class PortoService {
         throw new AppError('ONBOARD_FAILED', 'Porto onboarding did not return an account address.')
       }
 
-      const grantedPermission = grantPermissionsParam
-        ? (response.accounts[0]?.capabilities?.permissions?.find(
-            (p) => p.key.publicKey.toLowerCase() === grantPermissionsParam.key.publicKey.toLowerCase(),
-          ) ?? null)
-        : null
+      const grantedPermission = response.accounts[0]?.capabilities?.permissions?.find(
+        (p) => p.key.publicKey.toLowerCase() === grantPermissionsParam.key.publicKey.toLowerCase(),
+      ) ?? null
 
       // Align with Porto CLI UX: notify dialog of success so the web page
       // can render a completion state instead of staying idle/blank.
@@ -702,7 +639,6 @@ export class PortoService {
         ? (Array.from(new Set([...existingPermissionIds, grantedPermission.id])) as `0x${string}`[])
         : existingPermissionIds
 
-      const defaults = options.grantOptions?.defaults
       this.config.porto = {
         ...this.config.porto,
         address: account.address,
@@ -710,16 +646,6 @@ export class PortoService {
         dialogHost: normalizeDialogHost(options.dialogHost),
         testnet: Boolean(options.testnet),
         permissionIds,
-        ...(grantedPermission && defaults
-          ? {
-              defaults: {
-                perTxUsd: options.grantOptions?.spendLimit ?? 25,
-                dailyUsd: 100,
-                expiryDays: 7,
-                allowlistRequired: true,
-              },
-            }
-          : {}),
       }
 
       return {
@@ -735,45 +661,28 @@ export class PortoService {
   }
 
   async grant(options: GrantOptions) {
+    const address = options.address ?? this.config.porto?.address
+    const chain = resolveConfiguredChain(this.config, options.chainId) ?? getChain(this.config.porto?.testnet)
+    // resolveConfiguredChain may return a generic Chain; narrow to the concrete type expected below.
+    const concreteChain = (chain.id === Chains.baseSepolia.id ? Chains.baseSepolia : Chains.base) as ReturnType<typeof getChain>
+
     const session = await getWalletClient({
-      address: options.address ?? this.config.porto?.address,
+      address,
       dialogHost: this.config.porto?.dialogHost,
       testnet: this.config.porto?.testnet,
     })
 
     try {
-      const key = await this.signer.getPortoKey()
-      const defaults = Boolean(options.defaults)
-      const callPermissions = parseGrantCalls(options.calls, defaults)
-      const address = options.address ?? this.config.porto?.address
-      const chain = resolveConfiguredChain(this.config, options.chainId)
+      const grantPermissionsParam = await this.buildGrantPermissionsParam(concreteChain, options.callTargets)
 
-      const perTxUsd = options.spendLimit ?? 25
-      const dailyUsd = 100
-      const feeTokenSymbol = chain?.id === Chains.baseSepolia.id ? 'EXP' : 'native'
-
-      // Combine sign-in and permission grant into a single wallet_connect call
-      // so the user only needs one dialog interaction instead of two.
       const connectResponse = await WalletActions.connect(session.client, {
-        ...(chain ? { chainIds: [chain.id] } : {}),
+        chainIds: [chain.id],
         ...(address ? { selectAccount: { address } } : { selectAccount: true }),
-        grantPermissions: {
-          expiry: getUnixExpirySeconds(options.expiry, defaults),
-          feeToken: defaults
-            ? ({ limit: String(perTxUsd) as `${number}`, symbol: feeTokenSymbol })
-            : null,
-          key,
-          permissions: {
-            calls: callPermissions,
-            ...(defaults
-              ? { spend: [{ limit: BigInt(Math.round(dailyUsd * 1_000_000)), period: 'day' as const }] }
-              : {}),
-          },
-        },
+        grantPermissions: grantPermissionsParam,
       })
 
       const grantedPermission = connectResponse.accounts[0]?.capabilities?.permissions?.find(
-        (p) => p.key.publicKey.toLowerCase() === key.publicKey.toLowerCase(),
+        (p) => p.key.publicKey.toLowerCase() === grantPermissionsParam.key.publicKey.toLowerCase(),
       )
 
       if (!grantedPermission) {
@@ -785,9 +694,6 @@ export class PortoService {
         permissionIds: Array.from(
           new Set([...(this.config.porto?.permissionIds ?? []), grantedPermission.id]),
         ) as `0x${string}`[],
-        defaults: defaults
-          ? { perTxUsd, dailyUsd, expiryDays: 7, allowlistRequired: true }
-          : this.config.porto?.defaults,
       }
 
       return {
@@ -883,15 +789,6 @@ export class PortoService {
       const calls = parseSendCalls(options.calls)
       const resolvedAddress = options.address ?? this.config.porto?.address
       const resolvedChainId = options.chainId ?? this.config.porto?.chainId
-      const pendingPermission = this.config.porto?.pendingPermission
-      const pendingPermissionId =
-        pendingPermission &&
-        pendingPermission.chainId === resolvedChainId &&
-        (!options.address ||
-          !this.config.porto?.address ||
-          options.address.toLowerCase() === this.config.porto.address.toLowerCase())
-          ? pendingPermission.id
-          : undefined
 
       let prepared: Awaited<ReturnType<typeof WalletActions.prepareCalls>>
       try {
@@ -905,10 +802,7 @@ export class PortoService {
           }),
           {
             code: 'PORTO_SEND_PREPARE_TIMEOUT',
-            details: {
-              pendingPermissionId: pendingPermissionId ?? null,
-              stage,
-            },
+            details: { stage },
             message: 'Timed out while preparing calls via Porto.',
           },
         )
@@ -917,7 +811,6 @@ export class PortoService {
         const metadata = errorMetadata(error)
         throw new AppError('PORTO_SEND_PREPARE_FAILED', 'Porto failed to prepare calls.', {
           ...metadata,
-          pendingPermissionId: pendingPermissionId ?? null,
           stage,
         })
       }
@@ -944,9 +837,7 @@ export class PortoService {
           }),
           {
             code: 'PORTO_SEND_SUBMIT_TIMEOUT',
-            details: {
-              stage,
-            },
+            details: { stage },
             message: 'Timed out while submitting prepared calls via Porto.',
           },
         )

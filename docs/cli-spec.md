@@ -62,68 +62,46 @@ Three user-facing commands:
 Configures one account end-to-end:
 - create or reuse account
 - initialize/reuse local agent signing key
-- grant default permissions (with optional overrides) using Porto precalls
-- report explicit permission state as `active_onchain` or `pending_activation`
+- grant permissions using Porto inline grant via `wallet_connect`
+- report granted permission ID
 
 Expected characteristics:
-- idempotent when re-run
-- interactive by default
-- clear non-interactive error with required flags/hints
-- explicit human progress output with phase + step context
+- idempotent when re-run (skips grant if an active permission already exists)
+- interactive by default (opens Porto dialog for passkey/account selection)
+- explicit human progress output with step context
 - per-step operator guidance (`Now`, `You`, result, and next action on failure)
 
 MVP policy:
 - `configure` supports local-admin setup only.
+- `configure` is add-only: to revoke permissions, use id.porto.sh.
 - Remote-admin/out-of-band setup (admin ceremony on another device) is explicitly deferred.
+- Permission policy (call allowlist, spend limits, expiry) is hardcoded to permissive defaults for now.
+  See `docs/permissions-plan.md` for the planned user-configurable policy approach.
 
-Idempotency and recovery semantics (required):
-- `configure` must reconcile from partial state and converge to one valid target state.
-- Re-running `configure` must never create duplicate signer keys, duplicate permission grants, or conflicting default profiles.
-- `configure` should evaluate and repair these checkpoints in order:
-1. account selected or created
-2. local Secure Enclave agent key present and usable
-3. current permission state resolved (`active_onchain` vs `pending_activation` vs missing)
-4. agent key permission envelope prepared (or renewed) through precall grant when required
-5. required permission envelope state classified and persisted for reruns
-6. final state clearly reported as `active_onchain` or `pending_activation`
-- If execution stops mid-run, the next run should continue from remaining checkpoints instead of restarting everything.
-- `configure` should report step outcomes with checkpoint statuses (`already_ok`, `created`, `updated`, `skipped`, `failed`) in the human flow summary.
-- checkpoint identifiers in output are:
-  - `account`
-  - `agent_key`
-  - `permission_state`
-  - `permission_preparation`
-  - `permission_classification`
-  - `outcome`
-- `configure` should run as explicit linear phases:
-1. account + signer readiness
-2. permission reconciliation and precall preparation
-3. state classification and operator guidance
-- each step should print:
-  - phase/step position
-  - what is happening now
-  - what the human must do (or that no action is required)
-  - success/failure for that step
-  - actionable next step if failed
-- MVP interaction rule: once an account address is configured, permission reads/reconciliation must not trigger a new dialog connect just to inspect state.
-- Current MVP implementation resolves active permissions from Relay key state (`wallet_getKeys`) for non-interactive reconciliation and send-path selection; locally persisted `permissionIds` are treated as cache only (no `latestPermissionId` pointer is used).
-- `configure` is Porto-precall-first: it should not require funding or a direct activation send during setup.
-- `configure` should avoid hidden fallback behavior and report explicit state outcomes.
-- `configure` should not enqueue duplicate precalls for the same desired permission envelope on rerun.
-- `configure` must not add hidden self-call allowances to the granted calls envelope.
-- `configure` should reject insecure broad self-call entries (`to: <account-address>` without a specific selector/signature) with an actionable error.
-- If desired permissions changed while previous setup is still pending, `configure` may queue a new precall but must report queueing risk and current state clearly.
-- `configure` output must always include an explicit state line:
-  - `active_onchain`: Relay `wallet_getKeys` confirms agent permissions are active onchain.
-  - `pending_activation`: grant/precall completed, but Relay does not yet show active onchain permission.
-- Deferred activation model: first successful real send may consume matching precalls and transition state to `active_onchain`.
+Default permission envelope (hardcoded):
+- Calls: any target, any function selector
+- Spend: $100/day
+- Expiry: 7 days
 
-Porto precall semantics (operator-facing):
-- `wallet_grantPermissions` in configure prepares permission intent without requiring an immediate onchain send.
-- Relay key reads (`wallet_getKeys`) reflect active onchain key state, not every queued precall intent.
-- Configure persists one local `pendingPermission` record to keep reruns idempotent and avoid duplicate precall grants for the same envelope.
-- First matching allowlisted `agent-wallet sign` send can consume prepared precalls and activate the permission onchain.
-- If permission intent changes before activation, configure may enqueue a newer precall and should report that state as `pending_activation` until Relay key state confirms activation.
+Idempotency semantics:
+- `configure` must never create duplicate signer keys or duplicate permission grants.
+- Re-running `configure` checks for an existing active permission via `wallet_getKeys` before granting.
+- If an active permission exists, the account step reports `already_ok` and skips the dialog.
+- If no active permission exists, `configure` opens the dialog for sign-in + grant.
+
+Checkpoint identifiers in output:
+- `agent_key`
+- `account`
+
+Each step prints:
+- step position
+- what is happening now
+- what the human must do (or that no action is required)
+- success/failure for that step
+- actionable next step if failed
+
+Active permissions are resolved from Relay key state (`wallet_getKeys`).
+Locally persisted `permissionIds` are a cache only.
 
 ### 2. `agent-wallet sign`
 Agent execution/signing command.
@@ -143,14 +121,14 @@ Inspection command.
 Should include:
 - active account/profile
 - backend/provider in use
-- activation state (`active_onchain`, `pending_activation`, or `unconfigured`)
+- activation state (`active_onchain` or `unconfigured`)
 - key backend health
 - granted permissions summary + expiry
 - balance snapshot per configured chain
 
 MVP status behavior:
 - `status` permission summary is derived from Relay key state and does not initiate a dialog connect.
-- If no active agent permission is found on Relay, permissions summary reports zero and should be interpreted as unconfigured/expired until `configure` grants/renews one.
+- If no active agent permission is found on Relay, permissions summary reports zero and activation state is `unconfigured`.
 
 ## Account Model
 - Multiple accounts are first-class in the data model.
@@ -192,17 +170,6 @@ All command failures return:
 { "ok": false, "error": { "code": "...", "message": "...", "details": {} } }
 ```
 
-Interactive command in non-interactive context returns:
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "NON_INTERACTIVE_REQUIRES_FLAGS",
-    "message": "Command requires an interactive TTY. Re-run with explicit flags or --headless."
-  }
-}
-```
-
 ## Testing (E2E)
 Strategy:
 - Prefer a small number of scenario tests with broad coverage over many narrow tests.
@@ -212,18 +179,14 @@ Strategy:
 Required scenario set (concise but high-signal):
 1. `configure.e2e`
 - Happy path: creates or reuses account and grants agent key permissions.
-- Security invariant: resulting permissions are scoped; state is explicitly reported as `active_onchain` or `pending_activation`.
 - Recovery invariant: rerun is idempotent and does not duplicate keys/grants.
-- Output invariant: human flow markers appear in order (phase/step/now/result), include state classification, and include actionable guidance.
+- Output invariant: human flow markers appear in order (step/now/result), include actionable guidance.
 2. `sign.e2e`
-- Happy path: allowed call succeeds.
-- Security invariant: disallowed call fails with structured error code.
+- Happy path: call succeeds with a valid bundle ID.
 - Output invariant: JSON response schema is stable.
 3. `status.e2e`
 - Happy path: reports account, permissions summary, and balances.
 - Output invariant: both `--json` and `--human` modes work.
-4. `non-interactive.e2e`
-- Invariant: interactive-only operations fail fast with actionable structured error in non-interactive contexts.
 
 Notes:
 - E2E defaults to testnet (Base Sepolia + faucet funding) for automation reliability, with optional prod override for manual smoke checks.

@@ -110,7 +110,7 @@ describe('e2e flow', () => {
       expect((permissions?.total ?? 0) >= (permissions?.active ?? 0)).toBe(true)
 
       const activation = jsonStatus.payload?.activation as { state?: string } | undefined
-      expect(['active_onchain', 'pending_activation', 'unconfigured']).toContain(activation?.state)
+      expect(['active_onchain', 'unconfigured']).toContain(activation?.state)
 
       const humanStatus = await runCli(['status', '--human'], env.env)
       expect(humanStatus.exitCode).toBe(0)
@@ -138,12 +138,8 @@ describe('e2e flow', () => {
       expect(rerunResult.stdout).toContain('Configure complete')
 
       const checkpoints = parseCheckpoints(rerunResult.stdout)
-      expect(checkpoints.get('account')).toBe('already_ok')
       expect(checkpoints.get('agent_key')).toBe('already_ok')
-      expect(['already_ok', 'updated']).toContain(checkpoints.get('permission_state'))
-      expect(['already_ok', 'updated']).toContain(checkpoints.get('permission_preparation'))
-      expect(['already_ok', 'updated']).toContain(checkpoints.get('permission_classification'))
-      expect(['already_ok', 'updated']).toContain(checkpoints.get('outcome'))
+      expect(['already_ok', 'updated']).toContain(checkpoints.get('account'))
 
       // ── Verify persisted config ───────────────────────────────────────────
 

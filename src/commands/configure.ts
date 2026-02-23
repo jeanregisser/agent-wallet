@@ -17,12 +17,6 @@ type ConfigureCheckpoint = {
   details?: Record<string, unknown>
 }
 
-type ConfigureStepResult = {
-  details?: Record<string, unknown>
-  status: ConfigureCheckpointStatus
-  summary: string
-}
-
 type ConfigureOptions = {
   createAccount?: boolean
   dialog?: string
@@ -32,32 +26,7 @@ type ConfigureOptions = {
 
 const TOTAL_STEPS = 2
 
-function makeCheckpointFailure(
-  checkpoint: ConfigureCheckpointName,
-  error: unknown,
-  checkpoints: ConfigureCheckpoint[],
-  nextAction?: string,
-) {
-  const appError = toAppError(error)
-  const resolvedNextAction = nextAction ?? nextActionForError(checkpoint, appError)
-  const failedCheckpoint: ConfigureCheckpoint = {
-    checkpoint,
-    status: 'failed',
-    details: {
-      code: appError.code,
-      message: appError.message,
-      nextAction: resolvedNextAction,
-      ...appError.details,
-    },
-  }
-
-  return new AppError(appError.code, appError.message, {
-    ...appError.details,
-    checkpoint,
-    checkpoints: [...checkpoints, failedCheckpoint],
-    nextAction: resolvedNextAction,
-  })
-}
+// ── Error handling ────────────────────────────────────────────────────────────
 
 function nextActionForError(checkpoint: ConfigureCheckpointName, error: AppError) {
   const hint = error.details?.hint
@@ -82,6 +51,17 @@ function nextActionForError(checkpoint: ConfigureCheckpointName, error: AppError
   }
 }
 
+function makeStepError(checkpoint: ConfigureCheckpointName, error: unknown) {
+  const appError = toAppError(error)
+  return new AppError(appError.code, appError.message, {
+    ...appError.details,
+    checkpoint,
+    nextAction: nextActionForError(checkpoint, appError),
+  })
+}
+
+// ── Progress logging (stderr) ─────────────────────────────────────────────────
+
 function logStepStart(options: { now: string; step: number; title: string; you: string }) {
   process.stderr.write(
     [
@@ -99,16 +79,18 @@ function logStepResult(options: { details?: string; status: ConfigureCheckpointS
   process.stderr.write(lines.join('\n') + '\n\n')
 }
 
-function logStepFailure(options: { error: AppError; nextAction: string }) {
+function logStepFailure(checkpoint: ConfigureCheckpointName, error: AppError) {
   process.stderr.write(
     [
-      `Result: FAILED (${options.error.code})`,
-      `Error: ${options.error.message}`,
-      `Next: ${options.nextAction}`,
+      `Result: FAILED (${error.code})`,
+      `Error: ${error.message}`,
+      `Next: ${nextActionForError(checkpoint, error)}`,
       '',
     ].join('\n'),
   )
 }
+
+// ── Config helpers ────────────────────────────────────────────────────────────
 
 function ensurePermissionIdList(config: AgentWalletConfig, permissionId: `0x${string}`) {
   const ids = new Set(config.porto?.permissionIds ?? [])
@@ -119,39 +101,108 @@ function ensurePermissionIdList(config: AgentWalletConfig, permissionId: `0x${st
   }
 }
 
-async function runStep(parameters: {
-  checkpoint: ConfigureCheckpointName
-  checkpoints: ConfigureCheckpoint[]
-  now: string
-  run: () => Promise<ConfigureStepResult>
-  step: number
-  title: string
-  you: string
-}) {
-  const { checkpoint, checkpoints } = parameters
+// ── Steps ─────────────────────────────────────────────────────────────────────
+
+async function runAgentKeyStep(signer: SignerService, config: AgentWalletConfig): Promise<ConfigureCheckpoint> {
   logStepStart({
-    now: parameters.now,
-    step: parameters.step,
-    title: parameters.title,
-    you: parameters.you,
+    step: 1,
+    title: 'Agent key readiness',
+    now: 'Ensure the local Secure Enclave agent key exists and is usable.',
+    you: 'No manual action unless macOS asks for keychain/biometric confirmation.',
   })
 
   try {
-    const result = await parameters.run()
-    checkpoints.push({
-      checkpoint,
-      status: result.status,
-      ...(result.details ? { details: result.details } : {}),
-    })
-    logStepResult({ details: result.summary, status: result.status })
-    return result
+    const initialized = await signer.init()
+    await signer.getPortoKey()
+    saveConfig(config)
+
+    const status = initialized.created ? 'created' : 'already_ok'
+    logStepResult({ status, details: `Secure Enclave key ${initialized.created ? 'created' : 'already exists'} (${initialized.keyId}).` })
+    return { checkpoint: 'agent_key', status, details: { backend: initialized.backend, keyId: initialized.keyId } }
   } catch (error) {
     const appError = toAppError(error)
-    const nextAction = nextActionForError(checkpoint, appError)
-    logStepFailure({ error: appError, nextAction })
-    throw makeCheckpointFailure(checkpoint, appError, checkpoints, nextAction)
+    logStepFailure('agent_key', appError)
+    throw makeStepError('agent_key', appError)
   }
 }
+
+type AccountStepResult = {
+  checkpoint: ConfigureCheckpoint
+  address: `0x${string}`
+  chainId: number | undefined
+  permissionId: `0x${string}` | undefined
+}
+
+async function runAccountStep(
+  porto: PortoService,
+  config: AgentWalletConfig,
+  options: ConfigureOptions,
+): Promise<AccountStepResult> {
+  logStepStart({
+    step: 2,
+    title: 'Account & permissions',
+    now: 'Connect or create account and grant agent permissions.',
+    you: 'Approve the passkey and permissions in your browser dialog.',
+  })
+
+  try {
+    const hadAddress = Boolean(config.porto?.address)
+    const shouldOnboard = Boolean(options.createAccount) || !config.porto?.address
+
+    let address: `0x${string}`
+    let chainId: number | undefined
+    let permissionId: `0x${string}` | undefined
+    let status: ConfigureCheckpointStatus
+    let summary: string
+
+    if (shouldOnboard) {
+      const onboardResult = await porto.onboard({
+        callTargets: options.to,
+        createAccount: options.createAccount,
+        dialogHost: options.dialog,
+        testnet: options.testnet,
+      })
+      address = onboardResult.address
+      chainId = onboardResult.chainId
+      permissionId = onboardResult.grantedPermission?.id
+      status = hadAddress ? 'updated' : 'created'
+      summary = `Account ready at ${address} on chain ${String(chainId)}.`
+
+      if (permissionId) ensurePermissionIdList(config, permissionId)
+      saveConfig(config)
+    } else {
+      address = config.porto!.address!
+      chainId = config.porto?.chainId
+
+      // Existing account: check for an active permission before re-granting.
+      const active = await porto.activePermission({ address, chainId })
+      if (active) {
+        permissionId = active.permissionId
+        status = 'already_ok'
+        summary = `Account and active permission already configured (${active.permissionId}).`
+        ensurePermissionIdList(config, permissionId)
+        saveConfig(config)
+      } else {
+        // No active permission: grant with defaults.
+        const grantResult = await porto.grant({ address, callTargets: options.to, chainId })
+        permissionId = grantResult.permissionId
+        status = 'updated'
+        summary = `Permission granted (${permissionId}).`
+        ensurePermissionIdList(config, permissionId)
+        saveConfig(config)
+      }
+    }
+
+    logStepResult({ status, details: summary })
+    return { checkpoint: { checkpoint: 'account', status, details: { address, chainId, permissionId } }, address, chainId, permissionId }
+  } catch (error) {
+    const appError = toAppError(error)
+    logStepFailure('account', appError)
+    throw makeStepError('account', appError)
+  }
+}
+
+// ── Flow orchestration ────────────────────────────────────────────────────────
 
 async function runConfigureFlow(
   mode: OutputMode,
@@ -171,113 +222,25 @@ async function runConfigureFlow(
   // expiry) interactively or via flags. See docs/permissions-plan.md for the planned approach.
   // For now, configure grants default permissions: any target, $100/day spend limit, 7-day expiry.
 
-  const checkpoints: ConfigureCheckpoint[] = []
-  let address = config.porto?.address
-  let chainId = config.porto?.chainId
-  let grantedPermissionId: `0x${string}` | undefined
-
   process.stderr.write('Configure wallet (local-admin setup)\nPowered by Porto\n\n')
 
-  await runStep({
-    checkpoint: 'agent_key',
-    checkpoints,
-    now: 'Ensure the local Secure Enclave agent key exists and is usable.',
-    run: async () => {
-      const initialized = await signer.init()
-      await signer.getPortoKey()
-      saveConfig(config)
-      return {
-        details: { backend: initialized.backend, keyId: initialized.keyId },
-        status: initialized.created ? 'created' : 'already_ok',
-        summary: `Secure Enclave key ${initialized.created ? 'created' : 'already exists'} (${initialized.keyId}).`,
-      }
-    },
-    step: 1,
-    title: 'Agent key readiness',
-    you: 'No manual action unless macOS asks for keychain/biometric confirmation.',
-  })
-
-  await runStep({
-    checkpoint: 'account',
-    checkpoints,
-    now: 'Connect or create account and grant agent permissions.',
-    run: async () => {
-      const hadAddress = Boolean(address)
-      const shouldOnboard = Boolean(options.createAccount) || !address
-
-      if (shouldOnboard) {
-        const onboardResult = await porto.onboard({
-          callTargets: options.to,
-          createAccount: options.createAccount,
-          dialogHost: options.dialog,
-          testnet: options.testnet,
-        })
-        address = onboardResult.address
-        chainId = onboardResult.chainId
-
-        if (onboardResult.grantedPermission) {
-          grantedPermissionId = onboardResult.grantedPermission.id
-          ensurePermissionIdList(config, grantedPermissionId)
-        }
-
-        saveConfig(config)
-        return {
-          details: { address, chainId },
-          status: hadAddress ? 'updated' : 'created',
-          summary: `Account ready at ${address} on chain ${String(chainId)}.`,
-        }
-      }
-
-      // Existing account: check for an active permission before re-granting.
-      const active = await porto.activePermission({ address, chainId })
-      if (active) {
-        grantedPermissionId = active.permissionId
-        ensurePermissionIdList(config, grantedPermissionId)
-        saveConfig(config)
-        return {
-          details: { address, chainId, permissionId: active.permissionId },
-          status: 'already_ok',
-          summary: `Account and active permission already configured (${active.permissionId}).`,
-        }
-      }
-
-      // No active permission: grant with defaults.
-      const grantResult = await porto.grant({ address, callTargets: options.to, chainId })
-      grantedPermissionId = grantResult.permissionId
-      ensurePermissionIdList(config, grantedPermissionId)
-      saveConfig(config)
-
-      return {
-        details: { address, chainId, permissionId: grantedPermissionId },
-        status: 'updated',
-        summary: `Permission granted (${grantedPermissionId}).`,
-      }
-    },
-    step: 2,
-    title: 'Account & permissions',
-    you: 'Approve the passkey and permissions in your browser dialog.',
-  })
-
-  if (!address) {
-    throw makeCheckpointFailure(
-      'account',
-      new AppError('MISSING_ACCOUNT_ADDRESS', 'No account is configured. Run `agent-wallet configure` again.'),
-      checkpoints,
-    )
-  }
+  const agentKeyCheckpoint = await runAgentKeyStep(signer, config)
+  const accountResult = await runAccountStep(porto, config, options)
 
   return {
-    account: { address, chainId: chainId ?? config.porto?.chainId },
+    account: { address: accountResult.address, chainId: accountResult.chainId ?? config.porto?.chainId },
     activation: {
       state: 'granted',
-      ...(grantedPermissionId ? { permissionId: grantedPermissionId } : {}),
+      ...(accountResult.permissionId ? { permissionId: accountResult.permissionId } : {}),
     },
-    checkpoints,
+    checkpoints: [agentKeyCheckpoint, accountResult.checkpoint],
     command: 'configure',
     poweredBy: 'Porto',
     setupMode: 'local-admin',
   }
 }
+
+// ── Human renderer ────────────────────────────────────────────────────────────
 
 function renderHuman({ payload }: { payload: Record<string, unknown> }) {
   const checkpoints = Array.isArray(payload.checkpoints)
@@ -298,6 +261,8 @@ function renderHuman({ payload }: { payload: Record<string, unknown> }) {
 
   return lines.join('\n')
 }
+
+// ── Command registration ──────────────────────────────────────────────────────
 
 export function registerConfigureCommand(
   program: Command,

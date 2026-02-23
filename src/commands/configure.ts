@@ -82,9 +82,8 @@ function nextActionForError(checkpoint: ConfigureCheckpointName, error: AppError
   }
 }
 
-function logStepStart(mode: OutputMode, options: { now: string; step: number; title: string; you: string }) {
-  if (mode !== 'human') return
-  process.stdout.write(
+function logStepStart(options: { now: string; step: number; title: string; you: string }) {
+  process.stderr.write(
     [
       `[Step ${String(options.step)}/${String(TOTAL_STEPS)}] ${options.title}`,
       `Now: ${options.now}`,
@@ -93,17 +92,15 @@ function logStepStart(mode: OutputMode, options: { now: string; step: number; ti
   )
 }
 
-function logStepResult(mode: OutputMode, options: { details?: string; status: ConfigureCheckpointStatus }) {
-  if (mode !== 'human') return
+function logStepResult(options: { details?: string; status: ConfigureCheckpointStatus }) {
   const label = options.status === 'failed' ? 'FAILED' : options.status === 'skipped' ? 'SKIPPED' : 'SUCCESS'
   const lines = [`Result: ${label} (${options.status})`]
   if (options.details) lines.push(`Details: ${options.details}`)
-  process.stdout.write(lines.join('\n') + '\n\n')
+  process.stderr.write(lines.join('\n') + '\n\n')
 }
 
-function logStepFailure(mode: OutputMode, options: { error: AppError; nextAction: string }) {
-  if (mode !== 'human') return
-  process.stdout.write(
+function logStepFailure(options: { error: AppError; nextAction: string }) {
+  process.stderr.write(
     [
       `Result: FAILED (${options.error.code})`,
       `Error: ${options.error.message}`,
@@ -125,15 +122,14 @@ function ensurePermissionIdList(config: AgentWalletConfig, permissionId: `0x${st
 async function runStep(parameters: {
   checkpoint: ConfigureCheckpointName
   checkpoints: ConfigureCheckpoint[]
-  mode: OutputMode
   now: string
   run: () => Promise<ConfigureStepResult>
   step: number
   title: string
   you: string
 }) {
-  const { checkpoint, checkpoints, mode } = parameters
-  logStepStart(mode, {
+  const { checkpoint, checkpoints } = parameters
+  logStepStart({
     now: parameters.now,
     step: parameters.step,
     title: parameters.title,
@@ -147,12 +143,12 @@ async function runStep(parameters: {
       status: result.status,
       ...(result.details ? { details: result.details } : {}),
     })
-    logStepResult(mode, { details: result.summary, status: result.status })
+    logStepResult({ details: result.summary, status: result.status })
     return result
   } catch (error) {
     const appError = toAppError(error)
     const nextAction = nextActionForError(checkpoint, appError)
-    logStepFailure(mode, { error: appError, nextAction })
+    logStepFailure({ error: appError, nextAction })
     throw makeCheckpointFailure(checkpoint, appError, checkpoints, nextAction)
   }
 }
@@ -180,12 +176,11 @@ async function runConfigureFlow(
   let chainId = config.porto?.chainId
   let grantedPermissionId: `0x${string}` | undefined
 
-  process.stdout.write('Configure wallet (local-admin setup)\nPowered by Porto\n\n')
+  process.stderr.write('Configure wallet (local-admin setup)\nPowered by Porto\n\n')
 
   await runStep({
     checkpoint: 'agent_key',
     checkpoints,
-    mode,
     now: 'Ensure the local Secure Enclave agent key exists and is usable.',
     run: async () => {
       const initialized = await signer.init()
@@ -205,7 +200,6 @@ async function runConfigureFlow(
   await runStep({
     checkpoint: 'account',
     checkpoints,
-    mode,
     now: 'Connect or create account and grant agent permissions.',
     run: async () => {
       const hadAddress = Boolean(address)

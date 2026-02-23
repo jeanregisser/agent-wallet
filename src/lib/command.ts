@@ -23,21 +23,8 @@ export async function runCommandAction(
     }
 
     mode = resolveOutputMode(options, fallbackMode)
-    let restoreStdout: (() => void) | undefined
-    if (mode === 'json') {
-      const originalWrite = process.stdout.write.bind(process.stdout)
-      process.stdout.write = (() => true) as typeof process.stdout.write
-      restoreStdout = () => {
-        process.stdout.write = originalWrite
-      }
-    }
 
-    let payload: Record<string, unknown>
-    try {
-      payload = await action(mode)
-    } finally {
-      restoreStdout?.()
-    }
+    const payload = await action(mode)
 
     emitSuccess(mode, payload, humanRenderer)
   } catch (error) {

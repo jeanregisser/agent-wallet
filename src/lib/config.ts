@@ -2,6 +2,18 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
+export type PrecallPermission = {
+  address: `0x${string}`
+  chainId: number
+  expiry: number
+  id: `0x${string}`
+  key: { publicKey: `0x${string}`; type: string }
+  permissions: {
+    calls: { to?: `0x${string}`; signature?: string }[]
+    spend: { limit: string; period: string; token?: `0x${string}` | null }[]
+  }
+}
+
 export type AgentWalletConfig = {
   version: 1
   signer: {
@@ -15,7 +27,7 @@ export type AgentWalletConfig = {
     chainId?: number
     dialogHost?: string
     testnet?: boolean
-    permissionIds: `0x${string}`[]
+    precallPermissions: PrecallPermission[]
   }
 }
 
@@ -26,7 +38,7 @@ const DEFAULT_CONFIG: AgentWalletConfig = {
     backend: 'secure-enclave',
   },
   porto: {
-    permissionIds: [],
+    precallPermissions: [],
   },
 }
 
@@ -73,7 +85,7 @@ export function loadConfig(): AgentWalletConfig {
       ...parsed.signer,
     },
     porto: {
-      permissionIds: parsedPorto.permissionIds ?? [],
+      precallPermissions: parsedPorto.precallPermissions ?? [],
       ...(parsedPorto.address ? { address: parsedPorto.address } : {}),
       ...(typeof parsedPorto.chainId === 'number' ? { chainId: parsedPorto.chainId } : {}),
       ...(parsedPorto.dialogHost ? { dialogHost: parsedPorto.dialogHost } : {}),

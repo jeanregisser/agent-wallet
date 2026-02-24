@@ -28,7 +28,7 @@ export async function runAgentWallet(argv: string[] = process.argv) {
   })
 
   registerConfigureCommand(program, { config, porto, signer })
-  registerSignCommand(program, { porto })
+  registerSignCommand(program, { config, porto })
   registerStatusCommand(program, { config, porto, signer })
 
   let parseMode: OutputMode = 'human'

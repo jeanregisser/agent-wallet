@@ -34,7 +34,7 @@ type AgentWalletConfig = {
   porto?: {
     address?: `0x${string}`
     chainId?: number
-    permissionIds?: `0x${string}`[]
+    precallPermissions?: unknown[]
   }
 }
 
@@ -122,6 +122,7 @@ export function spawnCli(args: string[], env: NodeJS.ProcessEnv): CliHandle {
   let stderr = ''
   let stdoutBuffer = ''
   let cliExited = false
+  let cliExitCode: number | null = null
 
   const bufferedLines: string[] = []
 
@@ -171,8 +172,9 @@ export function spawnCli(args: string[], env: NodeJS.ProcessEnv): CliHandle {
     if (DEBUG) console.error(`[e2e][stderr] ${chunk}`)
   })
 
-  child.once('exit', () => {
+  child.once('exit', (code) => {
     cliExited = true
+    cliExitCode = code ?? 1
     for (const matcher of [...pendingMatchers]) {
       clearTimeout(matcher.timeoutId)
       matcher.reject(new Error(`CLI exited before pattern matched: ${String(matcher.pattern)}`))
@@ -204,7 +206,11 @@ export function spawnCli(args: string[], env: NodeJS.ProcessEnv): CliHandle {
     },
 
     async done(): Promise<CliRunResult> {
-      const exitCode = await waitForProcessExit(child, PROCESS_TIMEOUT_MS)
+      // If the child has already exited (tracked by our own exit handler), use
+      // the recorded code directly rather than waiting for an event that already fired.
+      const exitCode = cliExited && cliExitCode !== null
+        ? cliExitCode
+        : await waitForProcessExit(child, PROCESS_TIMEOUT_MS)
 
       if (stdoutBuffer.length > 0) {
         onLine(stdoutBuffer)

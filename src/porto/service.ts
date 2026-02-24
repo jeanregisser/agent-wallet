@@ -6,7 +6,7 @@ import * as WalletClient from 'porto/viem/WalletClient'
 
 import { AppError } from '../lib/errors.js'
 import { parseJsonFlag } from '../lib/encoding.js'
-import type { AgentWalletConfig } from '../lib/config.js'
+import type { AgentWalletConfig, PrecallPermission } from '../lib/config.js'
 import type { SignerService } from '../signer/service.js'
 
 // TODO: Replace with user-configurable permission spec (interactive or flag-based).
@@ -73,14 +73,14 @@ type RelayPermissionCall = {
 }
 
 type RelayPermissionSpend = {
-  limit: bigint
+  limit: bigint | string | number
   period: 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'
   token?: `0x${string}` | null
   type: 'spend'
 }
 
 type RelayKeyRecord = {
-  expiry: number
+  expiry: number | string
   hash?: `0x${string}`
   permissions: readonly (RelayPermissionCall | RelayPermissionSpend)[]
   publicKey: `0x${string}`
@@ -168,9 +168,15 @@ function errorMetadata(error: unknown) {
   }
 }
 
+function parseRelayExpiry(expiry: number | string): number {
+  if (typeof expiry === 'number') return expiry
+  if (expiry.startsWith('0x')) return Number(BigInt(expiry))
+  return Number(expiry)
+}
+
 function isRelayKeyRecord(value: unknown): value is RelayKeyRecord {
   if (!isObject(value)) return false
-  if (typeof value.expiry !== 'number') return false
+  if (typeof value.expiry !== 'number' && typeof value.expiry !== 'string') return false
   if (typeof value.hash !== 'undefined') {
     if (typeof value.hash !== 'string' || !value.hash.startsWith('0x')) return false
   }
@@ -451,6 +457,34 @@ export class PortoService {
     private readonly signer: SignerService,
   ) {}
 
+  private appendPrecallPermission(
+    address: `0x${string}`,
+    chainId: number,
+    granted: { id: `0x${string}`; expiry: number; key: { publicKey: `0x${string}`; type: string }; permissions?: unknown },
+  ) {
+    const raw = granted.permissions as {
+      calls?: { to?: `0x${string}`; signature?: string }[]
+      spend?: { limit: bigint | string; period: string; token?: `0x${string}` | null }[]
+    } | undefined
+
+    const precall: PrecallPermission = {
+      address,
+      chainId,
+      expiry: granted.expiry,
+      id: granted.id,
+      key: granted.key,
+      permissions: {
+        calls: raw?.calls ?? [],
+        spend: (raw?.spend ?? []).map((s) => ({ limit: String(s.limit), period: s.period, token: s.token ?? null })),
+      },
+    }
+
+    this.config.porto = {
+      ...this.config.porto!,
+      precallPermissions: [...(this.config.porto?.precallPermissions ?? []), precall],
+    }
+  }
+
   private async buildGrantPermissionsParam(
     chain: ReturnType<typeof getChain>,
     callTargets?: readonly `0x${string}`[],
@@ -474,7 +508,7 @@ export class PortoService {
     }
   }
 
-  private async listAgentPermissions(options: {
+  async listAgentPermissions(options: {
     address?: `0x${string}`
     chainId?: number
     includeExpired?: boolean
@@ -506,7 +540,7 @@ export class PortoService {
       .filter((candidate) => candidate.role === 'normal')
       .filter((candidate) => normalizeRelayKeyType(candidate.type) === agentKey.type)
       .filter((candidate) => candidate.publicKey.toLowerCase() === agentKey.publicKey.toLowerCase())
-      .filter((candidate) => (options.includeExpired ? true : candidate.expiry > nowSeconds))
+      .filter((candidate) => (options.includeExpired ? true : parseRelayExpiry(candidate.expiry) > nowSeconds))
       .map((candidate) => {
         const calls = candidate.permissions
           .filter((permission): permission is RelayPermissionCall => permission.type === 'call')
@@ -517,13 +551,13 @@ export class PortoService {
         const spend = candidate.permissions
           .filter((permission): permission is RelayPermissionSpend => permission.type === 'spend')
           .map((permission) => ({
-            limit: permission.limit,
+            limit: BigInt(permission.limit),
             period: permission.period,
             token: permission.token,
           }))
 
         return {
-          expiry: candidate.expiry,
+          expiry: parseRelayExpiry(candidate.expiry),
           id: (candidate.hash ?? candidate.publicKey) as `0x${string}`,
           key: {
             publicKey: candidate.publicKey,
@@ -535,22 +569,56 @@ export class PortoService {
           },
         }
       })
-      .sort((left, right) => right.expiry - left.expiry)
   }
 
-  async activePermission(options: { address?: `0x${string}`; chainId?: number }) {
-    const permissions = await this.listAgentPermissions({
-      address: options.address,
-      chainId: options.chainId,
-    })
+  async findMatchingPermission(options: {
+    address: `0x${string}`
+    callTargets?: readonly `0x${string}`[]
+    chainId?: number
+    precallPermissions?: PrecallPermission[]
+  }): Promise<{ id: `0x${string}`; chainId?: number } | null> {
+    const desiredCalls: { to: `0x${string}`; signature?: `0x${string}` }[] =
+      options.callTargets?.length
+        ? options.callTargets.map((to) => ({ to }))
+        : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
+    const desiredDailyLimit = BigInt(Math.round(DEFAULT_GRANT_DAILY_USD * 1_000_000))
 
-    const [active] = permissions
-    if (!active) return null
-
-    return {
-      expiry: active.expiry,
-      permissionId: active.id,
+    const callsMatch = (calls: { to?: `0x${string}`; signature?: string }[]) => {
+      // Desired calls must all be present (subset check). Porto may add extra entries
+      // (e.g. for fee handling), so exact length equality would give false negatives.
+      return desiredCalls.every((desired) =>
+        calls.some(
+          (c) =>
+            c.to?.toLowerCase() === desired.to.toLowerCase() &&
+            (desired.signature === undefined || c.signature?.toLowerCase() === desired.signature.toLowerCase()),
+        ),
+      )
     }
+
+    const spendMatch = (spend: { limit: bigint | string; period: string }[]) =>
+      spend.some((s) => s.period === 'day' && BigInt(s.limit) === desiredDailyLimit)
+
+    const onchain = await this.listAgentPermissions({ address: options.address, chainId: options.chainId })
+    for (const p of onchain) {
+      if (callsMatch(p.permissions.calls) && spendMatch(p.permissions.spend)) {
+        return { id: p.id }
+      }
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000)
+    for (const p of options.precallPermissions ?? []) {
+      if (
+        p.address === options.address &&
+        (!options.chainId || p.chainId === options.chainId) &&
+        p.expiry > nowSeconds &&
+        callsMatch(p.permissions.calls) &&
+        spendMatch(p.permissions.spend)
+      ) {
+        return { id: p.id, chainId: p.chainId }
+      }
+    }
+
+    return null
   }
 
   async permissionSummary(options: { address?: `0x${string}`; chainId?: number }) {
@@ -562,10 +630,11 @@ export class PortoService {
 
     const nowSeconds = Math.floor(Date.now() / 1_000)
     const active = permissions.filter((permission) => permission.expiry > nowSeconds)
+    const latestExpiry = active.length > 0 ? Math.max(...active.map((p) => p.expiry)) : null
 
     return {
       active: active.length,
-      latestExpiry: active[0] ? new Date(active[0].expiry * 1_000).toISOString() : null,
+      latestExpiry: latestExpiry !== null ? new Date(latestExpiry * 1_000).toISOString() : null,
       total: permissions.length,
     }
   }
@@ -634,18 +703,17 @@ export class PortoService {
         this.config.porto?.address &&
         this.config.porto.address.toLowerCase() !== account.address.toLowerCase()
 
-      const existingPermissionIds = addressChanged ? [] : (this.config.porto?.permissionIds ?? [])
-      const permissionIds = grantedPermission
-        ? (Array.from(new Set([...existingPermissionIds, grantedPermission.id])) as `0x${string}`[])
-        : existingPermissionIds
-
       this.config.porto = {
         ...this.config.porto,
         address: account.address,
         chainId: chain.id,
         dialogHost: normalizeDialogHost(options.dialogHost),
         testnet: Boolean(options.testnet),
-        permissionIds,
+        precallPermissions: addressChanged ? [] : (this.config.porto?.precallPermissions ?? []),
+      }
+
+      if (grantedPermission) {
+        this.appendPrecallPermission(account.address, chain.id, grantedPermission)
       }
 
       return {
@@ -689,12 +757,14 @@ export class PortoService {
         throw new AppError('GRANT_FAILED', 'Porto did not return a granted permission.')
       }
 
+      const resolvedAddress = (options.address ?? this.config.porto?.address) as `0x${string}`
+
       this.config.porto = {
         ...this.config.porto,
-        permissionIds: Array.from(
-          new Set([...(this.config.porto?.permissionIds ?? []), grantedPermission.id]),
-        ) as `0x${string}`[],
+        precallPermissions: this.config.porto?.precallPermissions ?? [],
       }
+
+      this.appendPrecallPermission(resolvedAddress, chain.id, grantedPermission)
 
       return {
         permissionId: grantedPermission.id,
@@ -856,6 +926,11 @@ export class PortoService {
       }
 
       const settlement = await waitForBundleSettlement(session.client, bundleId)
+
+      // Precall permissions are now on-chain — clear them from local config.
+      if (this.config.porto) {
+        this.config.porto = { ...this.config.porto, precallPermissions: [] }
+      }
 
       return {
         txHash: settlement.txHash,

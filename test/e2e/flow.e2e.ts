@@ -49,13 +49,84 @@ describe('e2e flow', () => {
         configureResult.exitCode,
         `configure failed:\nstdout: ${configureResult.stdout}\nstderr: ${configureResult.stderr}`,
       ).toBe(0)
-      expect(configureResult.stdout).toContain('Configure complete')
+      expect(normalizeText(configureResult.stdout)).toMatchInlineSnapshot(`
+        "
+
+        Open the URL below in your browser to continue:
+
+        https://id.porto.sh/dialog/?relayUrl=[dynamic]
+
+        Configure complete
+        Checkpoints:
+        - agent_key: created
+        - account: created
+        Account: [dynamic]
+        Chain ID: 84532
+        Permission ID: [dynamic]
+        "
+      `)
 
       // ── Get account details ───────────────────────────────────────────────
 
       const statusCheck = await runCli(['status', '--json'], env.env)
-      expect(statusCheck.payload?.ok).toBe(true)
+      expect(statusCheck.exitCode).toBe(0)
       const account = statusCheck.payload?.account as { address: `0x${string}`; chainId: number }
+      // After configure, precall is stored locally. The permission may already be
+      // on-chain (createAccount submits a tx) or still precall-pending.
+      expect(statusCheck.payload).toMatchInlineSnapshot({
+        account: { address: expect.any(String) },
+        activation: { state: expect.any(String) },
+        balances: [{ address: expect.any(String), formatted: expect.any(String), wei: expect.any(String) }],
+        permissions: {
+          active: expect.any(Number),
+          latestExpiry: expect.toSatisfy((v) => v === null || typeof v === 'string'),
+          total: expect.any(Number),
+        },
+        precallPermissions: [{ expiry: expect.any(String), id: expect.any(String) }],
+      }, `
+        {
+          "account": {
+            "address": Any<String>,
+            "chainId": 84532,
+            "chainName": "Base Sepolia",
+          },
+          "activation": {
+            "state": Any<String>,
+          },
+          "balances": [
+            {
+              "address": Any<String>,
+              "chainId": 84532,
+              "chainName": "Base Sepolia",
+              "formatted": Any<String>,
+              "symbol": "ETH",
+              "wei": Any<String>,
+            },
+          ],
+          "command": "status",
+          "ok": true,
+          "permissions": {
+            "active": Any<Number>,
+            "latestExpiry": toSatisfy<[Function anonymous]>,
+            "total": Any<Number>,
+          },
+          "poweredBy": "Porto",
+          "precallPermissions": [
+            {
+              "chainId": 84532,
+              "expiry": Any<String>,
+              "id": Any<String>,
+            },
+          ],
+          "signer": {
+            "backend": "secure-enclave",
+            "curve": "p256",
+            "exists": true,
+            "keyId": "se.agent.wallet.default",
+          },
+          "warnings": [],
+        }
+      `)
 
       // ── Fund account for signing tests (testnet only) ─────────────────────
 
@@ -72,10 +143,19 @@ describe('e2e flow', () => {
         allowedResult.exitCode,
         `allowed sign failed:\nstdout: ${allowedResult.stdout}\nstderr: ${allowedResult.stderr}`,
       ).toBe(0)
-      expect(allowedResult.payload?.ok).toBe(true)
-      expect(typeof allowedResult.payload?.bundleId).toBe('string')
-      const txHash = allowedResult.payload?.txHash
-      expect(txHash === null || typeof txHash === 'string').toBe(true)
+      expect(allowedResult.payload).toMatchInlineSnapshot({
+        bundleId: expect.any(String),
+        txHash: expect.any(String),
+      }, `
+        {
+          "bundleId": Any<String>,
+          "command": "sign",
+          "ok": true,
+          "poweredBy": "Porto",
+          "status": "success",
+          "txHash": Any<String>,
+        }
+      `)
 
       // ── Reject a disallowed call ──────────────────────────────────────────
 
@@ -85,38 +165,93 @@ describe('e2e flow', () => {
         env.env,
       )
       expect(disallowedResult.exitCode).not.toBe(0)
-      expect(disallowedResult.payload?.ok).toBe(false)
-      const error = disallowedResult.payload?.error as { code?: string; message?: string } | undefined
-      expect(typeof error?.code).toBe('string')
-      expect(typeof error?.message).toBe('string')
+      expect(disallowedResult.payload).toMatchInlineSnapshot({
+        error: { message: expect.any(String), details: { details: expect.any(String), message: expect.any(String) } },
+      }, `
+        {
+          "error": {
+            "code": "PORTO_SEND_PREPARE_FAILED",
+            "details": {
+              "code": -32603,
+              "details": Any<String>,
+              "message": Any<String>,
+              "name": "InternalRpcError",
+              "shortMessage": "An internal error was received.",
+              "stage": "prepare_calls",
+            },
+            "message": Any<String>,
+          },
+          "ok": false,
+        }
+      `)
 
       // ── Status: verify full state in json and human modes ─────────────────
 
       const jsonStatus = await runCli(['status', '--json'], env.env)
       expect(jsonStatus.exitCode).toBe(0)
-      expect(jsonStatus.payload?.ok).toBe(true)
-
       const statusAccount = jsonStatus.payload?.account as { address: string; chainId: number }
       expect(statusAccount?.address?.toLowerCase()).toBe(account.address.toLowerCase())
-      expect(statusAccount?.chainId).toBe(account.chainId)
-
-      const signer = jsonStatus.payload?.signer as { backend?: string; exists?: boolean } | undefined
-      expect(signer?.backend).toBe('secure-enclave')
-      expect(signer?.exists).toBe(true)
-
-      const permissions = jsonStatus.payload?.permissions as { active?: number; total?: number } | undefined
-      expect(typeof permissions?.active).toBe('number')
-      expect(typeof permissions?.total).toBe('number')
-      expect((permissions?.total ?? 0) >= (permissions?.active ?? 0)).toBe(true)
-
-      const activation = jsonStatus.payload?.activation as { state?: string } | undefined
-      expect(['active_onchain', 'unconfigured']).toContain(activation?.state)
+      expect(jsonStatus.payload).toMatchInlineSnapshot({
+        account: { address: expect.any(String) },
+        activation: { state: expect.any(String) },
+        balances: [{ address: expect.any(String), formatted: expect.any(String), wei: expect.any(String) }],
+        permissions: {
+          active: expect.any(Number),
+          latestExpiry: expect.toSatisfy((v) => v === null || typeof v === 'string'),
+          total: expect.any(Number),
+        },
+      }, `
+        {
+          "account": {
+            "address": Any<String>,
+            "chainId": 84532,
+            "chainName": "Base Sepolia",
+          },
+          "activation": {
+            "state": Any<String>,
+          },
+          "balances": [
+            {
+              "address": Any<String>,
+              "chainId": 84532,
+              "chainName": "Base Sepolia",
+              "formatted": Any<String>,
+              "symbol": "ETH",
+              "wei": Any<String>,
+            },
+          ],
+          "command": "status",
+          "ok": true,
+          "permissions": {
+            "active": Any<Number>,
+            "latestExpiry": toSatisfy<[Function anonymous]>,
+            "total": Any<Number>,
+          },
+          "poweredBy": "Porto",
+          "precallPermissions": [],
+          "signer": {
+            "backend": "secure-enclave",
+            "curve": "p256",
+            "exists": true,
+            "keyId": "se.agent.wallet.default",
+          },
+          "warnings": [],
+        }
+      `)
 
       const humanStatus = await runCli(['status', '--human'], env.env)
       expect(humanStatus.exitCode).toBe(0)
-      expect(humanStatus.stdout).toContain('Status')
-      expect(humanStatus.stdout).toContain('Activation:')
-      expect(humanStatus.stdout.toLowerCase()).toContain(account.address.toLowerCase())
+      expect(normalizeText(humanStatus.stdout)).toMatchInlineSnapshot(`
+        "Status
+        Account: [dynamic]
+        Chain: Base Sepolia (84532)
+        Signer: secure-enclave (ready)
+        Activation: active_onchain
+        Permissions: 1 active / 1 total
+        Latest permission expiry: [dynamic]
+        Balances:
+        - [dynamic] ETH on Base Sepolia"
+      `)
 
       // ── Rerun configure: verify idempotency ───────────────────────────────
 
@@ -139,14 +274,32 @@ describe('e2e flow', () => {
 
       const checkpoints = parseCheckpoints(rerunResult.stdout)
       expect(checkpoints.get('agent_key')).toBe('already_ok')
-      expect(['already_ok', 'updated']).toContain(checkpoints.get('account'))
+      expect(checkpoints.get('account')).toBe('already_ok')
 
       // ── Verify persisted config ───────────────────────────────────────────
 
       const config = await readAgentWalletConfig(env.configHome)
       expect(config.porto?.address?.toLowerCase()).toBe(account.address.toLowerCase())
-      const permissionIds = config.porto?.permissionIds ?? []
-      expect(new Set(permissionIds).size).toBe(permissionIds.length)
+      expect(config).toMatchInlineSnapshot({
+        porto: { address: expect.any(String) },
+        signer: { handle: expect.any(String) },
+      }, `
+        {
+          "porto": {
+            "address": Any<String>,
+            "chainId": 84532,
+            "dialogHost": "id.porto.sh",
+            "precallPermissions": [],
+            "testnet": true,
+          },
+          "signer": {
+            "backend": "secure-enclave",
+            "handle": Any<String>,
+            "keyId": "se.agent.wallet.default",
+          },
+          "version": 1,
+        }
+      `)
     },
     FLOW_TIMEOUT_MS,
   )
@@ -159,4 +312,15 @@ function parseCheckpoints(stdout: string): Map<string, string> {
     if (match?.[1] && match[2]) map.set(match[1], match[2])
   }
   return map
+}
+
+// Human-readable text normalization: replace values after known dynamic labels.
+function normalizeText(text: string): string {
+  return text
+    .replace(/relayUrl=\S+/g, 'relayUrl=[dynamic]')
+    .replace(/^(Account: )\S+/m, '$1[dynamic]')
+    .replace(/^(Permission ID: )\S+/m, '$1[dynamic]')
+    .replace(/^(Latest permission expiry: )\S+/m, '$1[dynamic]')
+    .replace(/^(\s+- )\S+( expires )\S+/m, '$1[dynamic]$2[dynamic]')
+    .replace(/^(- )[\d.]+ (ETH|EXP|USDC)/gm, '$1[dynamic] $2')
 }

@@ -1,6 +1,7 @@
 import { Command } from 'commander'
 import { AppError } from '../lib/errors.js'
 import { runCommandAction } from '../lib/command.js'
+import { saveConfig, type AgentWalletConfig } from '../lib/config.js'
 import type { PortoService } from '../porto/service.js'
 
 type SignOptions = {
@@ -28,8 +29,8 @@ function renderHuman({ payload }: { payload: Record<string, unknown> }) {
   ].join('\n')
 }
 
-export function registerSignCommand(program: Command, deps: { porto: PortoService }) {
-  const { porto } = deps
+export function registerSignCommand(program: Command, deps: { config: AgentWalletConfig; porto: PortoService }) {
+  const { config, porto } = deps
 
   const cmd = program
     .command('sign')
@@ -45,6 +46,7 @@ export function registerSignCommand(program: Command, deps: { porto: PortoServic
         calls: options.calls,
         chainId: parseChainId(options.chainId),
       })
+      saveConfig(config)
       return { command: 'sign', poweredBy: 'Porto', ...result }
     }, renderHuman),
   )

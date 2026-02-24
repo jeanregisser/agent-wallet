@@ -90,17 +90,6 @@ function logStepFailure(checkpoint: ConfigureCheckpointName, error: AppError) {
   )
 }
 
-// ── Config helpers ────────────────────────────────────────────────────────────
-
-function ensurePermissionIdList(config: AgentWalletConfig, permissionId: `0x${string}`) {
-  const ids = new Set(config.porto?.permissionIds ?? [])
-  ids.add(permissionId)
-  config.porto = {
-    ...config.porto,
-    permissionIds: Array.from(ids) as `0x${string}`[],
-  }
-}
-
 // ── Steps ─────────────────────────────────────────────────────────────────────
 
 async function runAgentKeyStep(signer: SignerService, config: AgentWalletConfig): Promise<ConfigureCheckpoint> {
@@ -168,27 +157,30 @@ async function runAccountStep(
       status = hadAddress ? 'updated' : 'created'
       summary = `Account ready at ${address} on chain ${String(chainId)}.`
 
-      if (permissionId) ensurePermissionIdList(config, permissionId)
       saveConfig(config)
     } else {
       address = config.porto!.address!
       chainId = config.porto?.chainId
 
-      // Existing account: check for an active permission before re-granting.
-      const active = await porto.activePermission({ address, chainId })
-      if (active) {
-        permissionId = active.permissionId
+      // Only grant if no existing permission (on-chain or precall) matches what we'd grant.
+      const existing = await porto.findMatchingPermission({
+        address,
+        callTargets: options.to,
+        chainId,
+        precallPermissions: config.porto?.precallPermissions,
+      })
+
+      if (existing) {
+        permissionId = existing.id
+        if (existing.chainId !== undefined) chainId = existing.chainId
         status = 'already_ok'
-        summary = `Account and active permission already configured (${active.permissionId}).`
-        ensurePermissionIdList(config, permissionId)
+        summary = `Permission already configured (${permissionId}).`
         saveConfig(config)
       } else {
-        // No active permission: grant with defaults.
         const grantResult = await porto.grant({ address, callTargets: options.to, chainId })
         permissionId = grantResult.permissionId
         status = 'updated'
         summary = `Permission granted (${permissionId}).`
-        ensurePermissionIdList(config, permissionId)
         saveConfig(config)
       }
     }

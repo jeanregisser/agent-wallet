@@ -24,6 +24,7 @@ function renderHuman({ payload }: { payload: Record<string, unknown> }) {
   const signer = payload.signer as { backend?: string; exists?: boolean } | undefined
   const permissions = payload.permissions as { active?: number; total?: number; latestExpiry?: string | null } | undefined
   const activation = payload.activation as { state?: string } | undefined
+  const precallPermissions = Array.isArray(payload.precallPermissions) ? (payload.precallPermissions as Array<{ id: string; chainId: number; expiry: string }>) : []
   const balances = Array.isArray(payload.balances) ? (payload.balances as Array<Record<string, unknown>>) : []
   const warnings = Array.isArray(payload.warnings) ? (payload.warnings as Array<Record<string, unknown>>) : []
 
@@ -37,6 +38,13 @@ function renderHuman({ payload }: { payload: Record<string, unknown> }) {
   ]
 
   if (permissions?.latestExpiry) lines.push(`Latest permission expiry: ${permissions.latestExpiry}`)
+
+  if (precallPermissions.length > 0) {
+    lines.push(`Precall permissions: ${precallPermissions.length} pending`)
+    for (const p of precallPermissions) {
+      lines.push(`  - ${p.id} expires ${p.expiry}`)
+    }
+  }
 
   if (balances.length > 0) {
     lines.push('Balances:')
@@ -96,7 +104,15 @@ export function registerStatusCommand(
       }
 
       const chain = porto.getChainDetails(chainId)
-      const activationState = permissionsSummary.active > 0 ? 'active_onchain' : 'unconfigured'
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const precallPermissions = (config.porto?.precallPermissions ?? [])
+        .filter((p) => p.expiry > nowSeconds)
+        .map((p) => ({ id: p.id, chainId: p.chainId, expiry: new Date(p.expiry * 1000).toISOString() }))
+
+      const activationState =
+        permissionsSummary.active > 0 ? 'active_onchain' :
+        precallPermissions.length > 0 ? 'precall_pending' :
+        'unconfigured'
 
       return {
         command: 'status',
@@ -109,6 +125,7 @@ export function registerStatusCommand(
         signer: signerInfo,
         activation: { state: activationState },
         permissions: permissionsSummary,
+        precallPermissions,
         balances,
         warnings,
       }

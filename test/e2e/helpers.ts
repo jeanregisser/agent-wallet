@@ -287,20 +287,26 @@ export function extractDialogUrl(line: string): string | null {
 }
 
 export function buildConfigureArgs(parameters: {
-  allowlistTo?: `0x${string}`
+  calls?: string[]         // address[:signature] entries
   createAccount?: boolean
   dialogHost?: string
+  expiry?: string
   mode: 'human' | 'json'
   network: 'prod' | 'testnet'
+  spendLimit?: string
+  spendPeriod?: string
 }): string[] {
-  const { allowlistTo, createAccount, dialogHost, mode, network } = parameters
+  const { calls, createAccount, dialogHost, expiry, mode, network, spendLimit, spendPeriod } = parameters
 
   const args = ['configure', `--${mode}`]
 
-  if (allowlistTo) args.push('--to', allowlistTo)
+  for (const call of calls ?? []) args.push('--call', call)
   if (createAccount) args.push('--create-account')
   if (network === 'testnet') args.push('--testnet')
   if (dialogHost) args.push('--dialog', dialogHost)
+  if (spendLimit) args.push('--spend-limit', spendLimit)
+  if (spendPeriod) args.push('--spend-period', spendPeriod)
+  if (expiry) args.push('--expiry', expiry)
 
   return args
 }

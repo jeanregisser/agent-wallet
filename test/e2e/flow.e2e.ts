@@ -33,7 +33,7 @@ describe('e2e flow', () => {
       // ── Configure: create account + grant permissions ───────────────────────
 
       const configure = spawnCli(
-        buildConfigureArgs({ allowlistTo, createAccount: true, dialogHost, mode: 'human', network }),
+        buildConfigureArgs({ calls: [allowlistTo], createAccount: true, dialogHost, mode: 'human', network, spendLimit: '0.01', spendPeriod: 'day', expiry: '7' }),
         env.env,
       )
 
@@ -256,7 +256,7 @@ describe('e2e flow', () => {
       // ── Rerun configure: verify idempotency ───────────────────────────────
 
       const rerun = spawnCli(
-        buildConfigureArgs({ allowlistTo, dialogHost, mode: 'human', network }),
+        buildConfigureArgs({ calls: [allowlistTo], dialogHost, mode: 'human', network, spendLimit: '0.01', spendPeriod: 'day', expiry: '7' }),
         env.env,
       )
 

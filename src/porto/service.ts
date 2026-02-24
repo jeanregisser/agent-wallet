@@ -1,6 +1,6 @@
 import { Chains, Mode, Porto } from 'porto'
 import * as WalletActions from 'porto/viem/WalletActions'
-import { createPublicClient, formatEther, http, type Chain } from 'viem'
+import { createPublicClient, formatEther, http, parseEther, type Chain } from 'viem'
 import { getCallsStatus } from 'viem/actions'
 import * as WalletClient from 'porto/viem/WalletClient'
 
@@ -9,16 +9,32 @@ import { parseJsonFlag } from '../lib/encoding.js'
 import type { AgentWalletConfig, PrecallPermission } from '../lib/config.js'
 import type { SignerService } from '../signer/service.js'
 
-// TODO: Replace with user-configurable permission spec (interactive or flag-based).
-// See docs/permissions-plan.md for the planned approach.
-//
 // These wildcard values grant the agent permission to call any contract with any
 // function. Spend limits and expiry below provide the primary risk boundaries.
+// spend.limit is a bigint in native token base units (wei for ETH).
+// feeToken.limit is a human-readable decimal string; Porto maps it to the minimum spend period.
 const DEFAULT_GRANT_ANY_TARGET = '0x3232323232323232323232323232323232323232' as `0x${string}`
 const DEFAULT_GRANT_ANY_SELECTOR = '0x32323232' as `0x${string}`
-const DEFAULT_GRANT_EXPIRY_DAYS = 7
-const DEFAULT_GRANT_DAILY_USD = 100
-const DEFAULT_GRANT_PER_TX_USD = 25
+// Per-period fee cap (human-readable decimal string; Porto maps this to the minimum spend period)
+const DEFAULT_GRANT_FEE_LIMIT_EXP    = '25'   as `${number}`  // 25 EXP/period on Base Sepolia
+const DEFAULT_GRANT_FEE_LIMIT_NATIVE = '0.01' as `${number}`  // 0.01 ETH/period on mainnet
+
+export type SpendPeriod = 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'
+
+export type PermissionPolicy = {
+  /** null = wildcard (any target, any selector) */
+  calls: { to: `0x${string}`; signature?: `0x${string}` }[] | null
+  /** Spend cap in native token base units (wei) */
+  spendLimitWei: bigint
+  /** Period over which the spend limit applies */
+  spendPeriod: SpendPeriod
+  /** ERC-20 token address for the spend limit; undefined = native token */
+  spendToken?: `0x${string}`
+  /** Fee cap per period as human-readable decimal; undefined → chain-specific default */
+  feeLimit?: `${number}`
+  /** Permission lifetime in days from now */
+  expiryDays: number
+}
 
 type SendCall = {
   data?: `0x${string}`
@@ -27,7 +43,7 @@ type SendCall = {
 }
 
 type OnboardOptions = {
-  callTargets?: readonly `0x${string}`[]
+  policy: PermissionPolicy
   createAccount?: boolean
   dialogHost?: string
   testnet?: boolean
@@ -35,7 +51,7 @@ type OnboardOptions = {
 
 type GrantOptions = {
   address?: `0x${string}`
-  callTargets?: readonly `0x${string}`[]
+  policy: PermissionPolicy
   chainId?: number
 }
 
@@ -487,23 +503,22 @@ export class PortoService {
 
   private async buildGrantPermissionsParam(
     chain: ReturnType<typeof getChain>,
-    callTargets?: readonly `0x${string}`[],
+    policy: PermissionPolicy,
   ) {
-    // TODO: Replace with a richer user-configurable permission spec (interactive or flag-based).
-    // See docs/permissions-plan.md for the planned approach.
     const key = await this.signer.getPortoKey()
     const feeTokenSymbol = chain.id === Chains.baseSepolia.id ? 'EXP' : 'native'
-    const calls =
-      callTargets && callTargets.length > 0
-        ? callTargets.map((to) => ({ to }))
-        : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
+    const feeLimit = policy.feeLimit
+      ?? (chain.id === Chains.baseSepolia.id ? DEFAULT_GRANT_FEE_LIMIT_EXP : DEFAULT_GRANT_FEE_LIMIT_NATIVE)
+    const calls = policy.calls
+      ? policy.calls
+      : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
     return {
-      expiry: Math.floor(Date.now() / 1000) + DEFAULT_GRANT_EXPIRY_DAYS * 24 * 60 * 60,
-      feeToken: { limit: String(DEFAULT_GRANT_PER_TX_USD) as `${number}`, symbol: feeTokenSymbol },
+      expiry: Math.floor(Date.now() / 1000) + policy.expiryDays * 24 * 60 * 60,
+      feeToken: { limit: feeLimit, symbol: feeTokenSymbol },
       key,
       permissions: {
         calls,
-        spend: [{ limit: BigInt(Math.round(DEFAULT_GRANT_DAILY_USD * 1_000_000)), period: 'day' as const }],
+        spend: [{ limit: policy.spendLimitWei, period: policy.spendPeriod, ...(policy.spendToken ? { token: policy.spendToken } : {}) }],
       },
     }
   }
@@ -573,15 +588,16 @@ export class PortoService {
 
   async findMatchingPermission(options: {
     address: `0x${string}`
-    callTargets?: readonly `0x${string}`[]
+    policy: PermissionPolicy
     chainId?: number
     precallPermissions?: PrecallPermission[]
   }): Promise<{ id: `0x${string}`; chainId?: number } | null> {
-    const desiredCalls: { to: `0x${string}`; signature?: `0x${string}` }[] =
-      options.callTargets?.length
-        ? options.callTargets.map((to) => ({ to }))
-        : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
-    const desiredDailyLimit = BigInt(Math.round(DEFAULT_GRANT_DAILY_USD * 1_000_000))
+    const desiredCalls = options.policy.calls
+      ? options.policy.calls
+      : [{ to: DEFAULT_GRANT_ANY_TARGET, signature: DEFAULT_GRANT_ANY_SELECTOR }]
+    const desiredSpendLimit = options.policy.spendLimitWei
+    const desiredSpendPeriod = options.policy.spendPeriod
+    const desiredSpendToken = options.policy.spendToken
 
     const callsMatch = (calls: { to?: `0x${string}`; signature?: string }[]) => {
       // Desired calls must all be present (subset check). Porto may add extra entries
@@ -595,8 +611,15 @@ export class PortoService {
       )
     }
 
-    const spendMatch = (spend: { limit: bigint | string; period: string }[]) =>
-      spend.some((s) => s.period === 'day' && BigInt(s.limit) === desiredDailyLimit)
+    const isNativeToken = (token: `0x${string}` | null | undefined) =>
+      token == null || token === NATIVE_TOKEN_ADDRESS
+
+    const spendMatch = (spend: { limit: bigint | string; period: string; token?: `0x${string}` | null }[]) =>
+      spend.some((s) => {
+        if (s.period !== desiredSpendPeriod || BigInt(s.limit) !== desiredSpendLimit) return false
+        if (desiredSpendToken === undefined) return isNativeToken(s.token)
+        return s.token?.toLowerCase() === desiredSpendToken.toLowerCase()
+      })
 
     const onchain = await this.listAgentPermissions({ address: options.address, chainId: options.chainId })
     for (const p of onchain) {
@@ -662,7 +685,7 @@ export class PortoService {
         throw error
       }
 
-      const grantPermissionsParam = await this.buildGrantPermissionsParam(chain, options.callTargets)
+      const grantPermissionsParam = await this.buildGrantPermissionsParam(chain, options.policy)
 
       const response = await WalletActions.connect(session.client, {
         chainIds: [chain.id],
@@ -741,7 +764,7 @@ export class PortoService {
     })
 
     try {
-      const grantPermissionsParam = await this.buildGrantPermissionsParam(concreteChain, options.callTargets)
+      const grantPermissionsParam = await this.buildGrantPermissionsParam(concreteChain, options.policy)
 
       const connectResponse = await WalletActions.connect(session.client, {
         chainIds: [chain.id],

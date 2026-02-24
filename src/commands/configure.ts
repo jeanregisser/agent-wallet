@@ -1,9 +1,13 @@
 import { Command } from 'commander'
+import { parseEther } from 'viem'
 import type { AgentWalletConfig } from '../lib/config.js'
 import { saveConfig } from '../lib/config.js'
 import { AppError, toAppError } from '../lib/errors.js'
 import { runCommandAction } from '../lib/command.js'
+import { isInteractive } from '../lib/interactive.js'
 import type { OutputMode } from '../lib/output.js'
+import { promptPermissionPolicy } from '../lib/permission-prompts.js'
+import type { PermissionPolicy, SpendPeriod } from '../porto/service.js'
 import type { PortoService } from '../porto/service.js'
 import type { SignerService } from '../signer/service.js'
 
@@ -18,13 +22,71 @@ type ConfigureCheckpoint = {
 }
 
 type ConfigureOptions = {
+  call?: string[]          // address[:signature] (repeatable)
   createAccount?: boolean
   dialog?: string
+  expiry?: string          // days
+  feeLimit?: string        // human-readable decimal
+  spendLimit?: string      // ETH decimal
+  spendPeriod?: string     // 'minute' | 'hour' | 'day' | 'week' | 'month' | 'year'
+  spendToken?: string      // ERC-20 token address; omit for native
   testnet?: boolean
-  to?: `0x${string}`[]
 }
 
 const TOTAL_STEPS = 2
+
+// ── Permission policy resolution ─────────────────────────────────────────────
+
+function parseCallArg(value: string): { to: `0x${string}`; signature?: `0x${string}` } {
+  const colonIdx = value.indexOf(':', 2) // skip 0x; addresses can't contain ':'
+  if (colonIdx === -1) return { to: value as `0x${string}` }
+  return {
+    to: value.slice(0, colonIdx) as `0x${string}`,
+    signature: value.slice(colonIdx + 1) as `0x${string}`,
+  }
+}
+
+async function resolvePermissionPolicy(options: ConfigureOptions): Promise<PermissionPolicy> {
+  const testnet = options.testnet
+  const prefillCalls = options.call?.length ? options.call.map(parseCallArg) : undefined
+
+  if (isInteractive()) {
+    return promptPermissionPolicy({
+      testnet,
+      prefill: {
+        calls: prefillCalls ?? null,
+        spendLimit: options.spendLimit,
+        spendPeriod: options.spendPeriod as SpendPeriod | undefined,
+        spendToken: options.spendToken,
+        feeLimit: options.feeLimit,
+        expiryDays: options.expiry ? parseInt(options.expiry, 10) : undefined,
+      },
+    })
+  }
+
+  // Non-interactive: require explicit flags
+  if (!options.spendLimit) {
+    throw new AppError(
+      'NON_INTERACTIVE_REQUIRES_FLAGS',
+      'Non-interactive configure requires --spend-limit <amount> (e.g. --spend-limit 0.01).',
+    )
+  }
+  if (!options.expiry) {
+    throw new AppError(
+      'NON_INTERACTIVE_REQUIRES_FLAGS',
+      'Non-interactive configure requires --expiry <days> (e.g. --expiry 7).',
+    )
+  }
+
+  return {
+    calls: prefillCalls ?? null,
+    spendLimitWei: parseEther(options.spendLimit as `${number}`),
+    spendPeriod: (options.spendPeriod ?? 'day') as SpendPeriod,
+    ...(options.spendToken ? { spendToken: options.spendToken as `0x${string}` } : {}),
+    feeLimit: options.feeLimit as `${number}` | undefined,
+    expiryDays: parseInt(options.expiry, 10),
+  }
+}
 
 // ── Error handling ────────────────────────────────────────────────────────────
 
@@ -126,6 +188,7 @@ async function runAccountStep(
   porto: PortoService,
   config: AgentWalletConfig,
   options: ConfigureOptions,
+  policy: PermissionPolicy,
 ): Promise<AccountStepResult> {
   logStepStart({
     step: 2,
@@ -146,7 +209,7 @@ async function runAccountStep(
 
     if (shouldOnboard) {
       const onboardResult = await porto.onboard({
-        callTargets: options.to,
+        policy,
         createAccount: options.createAccount,
         dialogHost: options.dialog,
         testnet: options.testnet,
@@ -165,7 +228,7 @@ async function runAccountStep(
       // Only grant if no existing permission (on-chain or precall) matches what we'd grant.
       const existing = await porto.findMatchingPermission({
         address,
-        callTargets: options.to,
+        policy,
         chainId,
         precallPermissions: config.porto?.precallPermissions,
       })
@@ -177,7 +240,7 @@ async function runAccountStep(
         summary = `Permission already configured (${permissionId}).`
         saveConfig(config)
       } else {
-        const grantResult = await porto.grant({ address, callTargets: options.to, chainId })
+        const grantResult = await porto.grant({ address, policy, chainId })
         permissionId = grantResult.permissionId
         status = 'updated'
         summary = `Permission granted (${permissionId}).`
@@ -210,14 +273,11 @@ async function runConfigureFlow(
     )
   }
 
-  // TODO: Allow the user to specify the permission policy (call allowlist, spend limits,
-  // expiry) interactively or via flags. See docs/permissions-plan.md for the planned approach.
-  // For now, configure grants default permissions: any target, $100/day spend limit, 7-day expiry.
-
   process.stderr.write('Configure wallet (local-admin setup)\nPowered by Porto\n\n')
 
   const agentKeyCheckpoint = await runAgentKeyStep(signer, config)
-  const accountResult = await runAccountStep(porto, config, options)
+  const policy = await resolvePermissionPolicy(options)
+  const accountResult = await runAccountStep(porto, config, options, policy)
 
   return {
     account: { address: accountResult.address, chainId: accountResult.chainId ?? config.porto?.chainId },
@@ -269,11 +329,36 @@ export function registerConfigureCommand(
     .option('--dialog <hostname>', 'Dialog host', 'id.porto.sh')
     .option('--create-account', 'Force creation of a new account')
     .option(
-      '--to <address>',
-      'Allowed target address (repeatable; omit to allow any target)',
-      (val: string, prev: `0x${string}`[]) => [...prev, val as `0x${string}`],
-      [] as `0x${string}`[],
+      '--call <address[:signature]>',
+      'Allowed call: address with optional :functionSignature (repeatable; omit to allow any)',
+      (val: string, prev: string[]) => [...prev, val],
+      [] as string[],
     )
+    .option('--spend-limit <amount>', 'Spend limit as a decimal (native ETH or --spend-token units; required when non-interactive)')
+    .option('--spend-period <period>', 'Spend period: minute|hour|day|week|month|year (default: day)')
+    .option('--expiry <days>', 'Permission validity in days (required when non-interactive)')
+    .option('--spend-token <address>', 'ERC-20 token address for spend limit (default: native ETH)')
+    .option('--fee-limit <amount>', 'Fee cap per period; default: 25 EXP testnet / 0.01 ETH mainnet')
+
+  cmd.addHelpText('after', `
+Examples:
+  # Interactive (TTY): prompts for all options
+  $ agent-wallet configure
+
+  # Non-interactive: any contract, 0.01 ETH/day, 7-day expiry
+  $ agent-wallet configure --spend-limit 0.01 --spend-period day --expiry 7
+
+  # Allowlist a specific contract address
+  $ agent-wallet configure --call 0xA0b8…eB48 --spend-limit 0.01 --expiry 7
+
+  # Allowlist with a specific function selector
+  $ agent-wallet configure --call 0xA0b8…eB48:transfer(address,uint256) --spend-limit 0.01 --expiry 7
+
+  # Multiple allowed contracts
+  $ agent-wallet configure --call 0xA0b8…eB48 --call 0xdead…beef --spend-limit 0.01 --expiry 7
+
+  # ERC-20 spend token with custom fee cap (testnet)
+  $ agent-wallet configure --spend-token 0xfca4…c64e --spend-limit 100 --expiry 30 --fee-limit 25 --testnet`)
 
   cmd.action((options: ConfigureOptions) =>
     runCommandAction(cmd, 'human', (mode) => runConfigureFlow(mode, options, config, porto, signer), renderHuman),

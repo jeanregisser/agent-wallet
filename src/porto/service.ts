@@ -780,6 +780,21 @@ export class PortoService {
         throw new AppError('GRANT_FAILED', 'Porto did not return a granted permission.')
       }
 
+      // Align with Porto CLI UX: notify dialog of success so the web page
+      // can render a completion state instead of staying idle/blank.
+      try {
+        const { messenger } = await import('porto/cli/Dialog')
+        messenger.send('success', {
+          title: 'Permissions granted',
+          content: 'The agent has been granted the requested permissions.',
+        })
+
+        // Give the message channel a brief moment to flush before process exit.
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      } catch {
+        // Non-fatal for grant result; CLI output remains source of truth.
+      }
+
       const resolvedAddress = (options.address ?? this.config.porto?.address) as `0x${string}`
 
       this.config.porto = {

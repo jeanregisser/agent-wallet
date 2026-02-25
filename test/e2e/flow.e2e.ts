@@ -19,7 +19,7 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const
 
 describe('e2e flow', () => {
   it(
-    'configure → sign → status → idempotent rerun',
+    'configure → sign → status → idempotent rerun → regrant',
     async () => {
       const env = await makeIsolatedEnv()
       const network = getLiveNetwork()
@@ -276,7 +276,7 @@ describe('e2e flow', () => {
       expect(checkpoints.get('agent_key')).toBe('already_ok')
       expect(checkpoints.get('account')).toBe('already_ok')
 
-      // ── Verify persisted config ───────────────────────────────────────────
+      // ── Verify persisted config after idempotent rerun ────────────────────
 
       const config = await readAgentWalletConfig(env.configHome)
       expect(config.porto?.address?.toLowerCase()).toBe(account.address.toLowerCase())
@@ -290,6 +290,98 @@ describe('e2e flow', () => {
             "chainId": 84532,
             "dialogHost": "id.porto.sh",
             "precallPermissions": [],
+            "testnet": true,
+          },
+          "signer": {
+            "backend": "secure-enclave",
+            "handle": Any<String>,
+            "keyId": "se.agent.wallet.default",
+          },
+          "version": 1,
+        }
+      `)
+
+      // ── Regrant: force grant path by changing spend limit ─────────────────
+      // A different spend limit won't match the existing onchain permission,
+      // so configure must call grant() — exercising the standalone grant path
+      // (including the dialog success message).
+
+      const regrant = spawnCli(
+        buildConfigureArgs({ calls: [allowlistTo], dialogHost, mode: 'human', network, spendLimit: '0.02', spendPeriod: 'day', expiry: '7' }),
+        env.env,
+      )
+
+      const regrantDialogLine = await regrant.waitFor(DIALOG_URL_PATTERN, 30_000)
+      await page.goto(extractDialogUrl(regrantDialogLine)!, { waitUntil: 'domcontentloaded' })
+      await page.getByTestId('sign-in').click()
+
+      const regrantResult = await regrant.done()
+      expect(
+        regrantResult.exitCode,
+        `regrant failed:\nstdout: ${regrantResult.stdout}\nstderr: ${regrantResult.stderr}`,
+      ).toBe(0)
+
+      const regrantCheckpoints = parseCheckpoints(regrantResult.stdout)
+      expect(regrantCheckpoints.get('agent_key')).toBe('already_ok')
+      expect(regrantCheckpoints.get('account')).toBe('updated')
+
+      // ── Verify persisted config after regrant ─────────────────────────────
+
+      const configAfterRegrant = await readAgentWalletConfig(env.configHome)
+      expect(configAfterRegrant.porto?.address?.toLowerCase()).toBe(account.address.toLowerCase())
+      expect(configAfterRegrant).toMatchInlineSnapshot({
+        porto: {
+          address: expect.any(String),
+          precallPermissions: [{
+            address: expect.any(String),
+            expiry: expect.any(Number),
+            id: expect.any(String),
+            key: { publicKey: expect.any(String) },
+          }],
+        },
+        signer: { handle: expect.any(String) },
+      }, `
+        {
+          "porto": {
+            "address": Any<String>,
+            "chainId": 84532,
+            "dialogHost": "id.porto.sh",
+            "precallPermissions": [
+              {
+                "address": Any<String>,
+                "chainId": 84532,
+                "expiry": Any<Number>,
+                "id": Any<String>,
+                "key": {
+                  "publicKey": Any<String>,
+                  "type": "p256",
+                },
+                "permissions": {
+                  "calls": [
+                    {
+                      "signature": "0x32323232",
+                      "to": "0x000000000000000000000000000000000000dead",
+                    },
+                    {
+                      "signature": "0x32323232",
+                      "to": "0x36a7cd5b1f475122a2b52580fc8e170a2cd312ef",
+                    },
+                  ],
+                  "spend": [
+                    {
+                      "limit": "25000000000000000000",
+                      "period": "day",
+                      "token": "0xfca413a634c4df6b98ebb970a44d9a32f8f5c64e",
+                    },
+                    {
+                      "limit": "10000000000000000",
+                      "period": "day",
+                      "token": "0x0000000000000000000000000000000000000000",
+                    },
+                  ],
+                },
+              },
+            ],
             "testnet": true,
           },
           "signer": {
